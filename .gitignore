@@ -1,0 +1,27 @@
+# Folders not for GitHub
+not_github/
+RFX-Fuse-arXiv/
+models/
+
+# Cache files
+data/cache/
+**/cache/
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
