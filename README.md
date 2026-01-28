@@ -12,7 +12,7 @@
 
 Breiman and Cutler designed Random Forests as more than an ensemble predictor. Their original implementation from the early 2000s included classification, regression, unsupervised learning, proximity-based similarity, outlier detection, missing value imputation, and visualization. Modern libraries like scikit-learn's random forests implementation (2010-2011) skipped many of these features. 
 
-These capabilities enable it to be a unified learning and similarity engine with just 1-2 model objects with comparable accuracy and capabilities to many industry standard tools normally use in combination with one another e.g. 1 model = 1 set of trees grown once is comparable to 4 tools for Time Series Regression. This vision has also been extended with native explainable similarity. 
+These capabilities enable it to be a unified learning and similarity engine. With just 1-2 model objects, we can achieve comparable accuracy and output to 3-5 main industery tools. For example, 1 model has comparable output to 4 separate tools for Time Series Regression + native explainable similarity. 1 model = 1 set of trees grown once. 
 
 ## Key Use Cases
 
