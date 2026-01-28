@@ -1,0 +1,39 @@
+# Folders not for GitHub
+not_github/
+RFX-Fuse-arXiv/
+models/
+
+# Cache files
+data/cache/
+**/cache/
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.so.*
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# PyPI readme files (not for GitHub)
+*PYPI*.md
+test_output/
+test_output.txt
+
+# IDE workspace files
+*.code-workspace
+
+# Tests (keep private for now)
+tests/

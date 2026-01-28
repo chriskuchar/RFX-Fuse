@@ -1,0 +1,28 @@
+# Include all source files
+include CMakeLists.txt
+include LICENSE
+include README.md
+include README_PYPI.md
+include setup.py
+include MANIFEST.in
+
+# Include all C++ source files
+recursive-include src *.cpp *.hpp *.h
+recursive-include include *.hpp *.h *.cuh
+recursive-include cuda *.cu *.cuh
+
+# Include Python bindings
+recursive-include python *.cpp *.hpp
+
+# Include examples
+recursive-include examples *.py *.md
+
+# Exclude build artifacts
+global-exclude *.o *.so *.a *.dylib *.dll
+global-exclude __pycache__ *.pyc *.pyo
+global-exclude build/ build_* cmake-build-*
+global-exclude *.data *.csv *.h5 *.hdf5
+global-exclude *.html *.png *.pdf
+
+
+
