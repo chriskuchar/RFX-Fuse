@@ -92,6 +92,7 @@ static void histogram_find_best_split_classification(
         if (gini < best_crit) {
             best_crit = gini;
             // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
+            // Without this fix, samples with value == bin_edges[b + 1] go to wrong child
             if (info.is_categorical) {
                 best_split_value = static_cast<real_t>(b);
             } else {
@@ -173,6 +174,7 @@ static void histogram_find_best_split_regression(
         if (mse < best_crit) {
             best_crit = mse;
             // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
+            // Without this fix, samples with value == bin_edges[b + 1] go to wrong child
             if (info.is_categorical) {
                 best_split_value = static_cast<real_t>(b);
             } else {

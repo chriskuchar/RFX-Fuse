@@ -291,12 +291,13 @@ void find_best_split_classification_histogram(
     
     *best_crit = best_gini;
     *best_bin = best_b;
-    
+
     // Convert bin to actual split value
     if (info.is_categorical) {
         *best_split_value = static_cast<real_t>(best_b);
     } else {
         // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
+        // Without this fix, samples with value == bin_edges[best_b + 1] go to wrong child
         *best_split_value = (info.bin_edges[best_b] + info.bin_edges[best_b + 1]) / 2.0f;
     }
 }
@@ -358,12 +359,13 @@ void find_best_split_regression_histogram(
     
     *best_crit = best_mse;
     *best_bin = best_b;
-    
+
     // Convert bin to actual split value
     if (info.is_categorical) {
         *best_split_value = static_cast<real_t>(best_b);
     } else {
         // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
+        // Without this fix, samples with value == bin_edges[best_b + 1] go to wrong child
         *best_split_value = (info.bin_edges[best_b] + info.bin_edges[best_b + 1]) / 2.0f;
     }
 }
