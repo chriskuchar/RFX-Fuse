@@ -2,11 +2,19 @@
 not_github/
 RFX-Fuse-arXiv/
 models/
+log/
 
 # Cache files
 data/cache/
 **/cache/
 *.pkl
+*.npz
+
+# Model files
+*.rfx
+
+# Log files
+*.log
 
 # Python
 __pycache__/
