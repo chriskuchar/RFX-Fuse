@@ -24,6 +24,7 @@
 #include <chrono>
 #include <iostream>
 #include <set>
+#include <map>
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -621,24 +622,32 @@ ImputationResults impute_missing_gpu_dense(
                     if (h_is_categorical[j]) {
                         // Classification
                         rf_config.task_type = TaskType::CLASSIFICATION;
-                        
+
                         std::set<integer_t> classes_set;
                         for (real_t v : y_train) {
                             classes_set.insert(static_cast<integer_t>(v));
                         }
-                        rf_config.nclass = classes_set.size();
-                        
+                        std::vector<integer_t> classes_vec(classes_set.begin(), classes_set.end());
+                        rf_config.nclass = classes_vec.size();
+
+                        // Remap raw labels to 0-based for fit_classification
+                        std::map<integer_t, integer_t> label_to_idx;
+                        for (integer_t idx = 0; idx < static_cast<integer_t>(classes_vec.size()); ++idx) {
+                            label_to_idx[classes_vec[idx]] = idx;
+                        }
+
                         std::vector<integer_t> y_train_int(n_train);
                         for (integer_t i = 0; i < n_train; ++i) {
-                            y_train_int[i] = static_cast<integer_t>(y_train[i]);
+                            y_train_int[i] = label_to_idx[static_cast<integer_t>(y_train[i])];
                         }
-                        
+
                         RandomForest rf(rf_config);
                         rf.fit_classification(X_train.data(), y_train_int.data(), nullptr);
-                        
+
                         std::vector<integer_t> pred_int(n_test);
                         rf.predict_classification(X_test.data(), n_test, pred_int.data());
-                        
+
+                        // predict_classification returns original labels (reverse-mapped internally)
                         for (integer_t i = 0; i < n_test; ++i) {
                             predictions[i] = static_cast<real_t>(pred_int[i]);
                         }

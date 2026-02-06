@@ -147,8 +147,8 @@ __global__ void gpu_histogram_find_split_classification_kernel(
     if (is_categorical) {
         *out_best_split = static_cast<real_t>(best_bin);
     } else {
-        // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-        *out_best_split = (bin_edges[best_bin] + bin_edges[best_bin + 1]) / 2.0f;
+        // FIX: Split point is at upper edge of best_bin (boundary between bin b and bin b+1)
+        *out_best_split = bin_edges[best_bin + 1];
     }
 }
 
@@ -268,8 +268,8 @@ __global__ void gpu_histogram_find_split_regression_kernel(
     if (is_categorical) {
         *out_best_split = static_cast<real_t>(best_bin);
     } else {
-        // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-        *out_best_split = (bin_edges[best_bin] + bin_edges[best_bin + 1]) / 2.0f;
+        // FIX: Split point is at upper edge of best_bin (boundary between bin b and bin b+1)
+        *out_best_split = bin_edges[best_bin + 1];
     }
 }
 

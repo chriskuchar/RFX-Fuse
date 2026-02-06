@@ -251,8 +251,8 @@ __global__ void gpu_find_best_split_classification_kernel(
     if (is_categorical) {
         *best_split_value_out = static_cast<real_t>(best_b);
     } else {
-        // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-        *best_split_value_out = (bin_edges[best_b] + bin_edges[best_b + 1]) / 2.0f;
+        // FIX: Split point is at upper edge of best_bin (boundary between bin b and bin b+1)
+        *best_split_value_out = bin_edges[best_b + 1];
     }
 }
 
@@ -318,8 +318,8 @@ __global__ void gpu_find_best_split_regression_kernel(
     if (is_categorical) {
         *best_split_value_out = static_cast<real_t>(best_b);
     } else {
-        // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-        *best_split_value_out = (bin_edges[best_b] + bin_edges[best_b + 1]) / 2.0f;
+        // FIX: Split point is at upper edge of best_bin (boundary between bin b and bin b+1)
+        *best_split_value_out = bin_edges[best_b + 1];
     }
 }
 

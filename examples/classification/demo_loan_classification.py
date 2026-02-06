@@ -99,7 +99,7 @@ def load_finance_cached(max_samples=5000):
         cache_file = cache_dir / "claim10_finance_s0.npz"
     if not cache_file.exists():
         print(f"ERROR: No finance cache found in {cache_dir}")
-        print("Please run test_arxiv_paper_claim10_finance.py first to generate cache.")
+        print("Please download the Kaggle Credit Score dataset and generate the cache.")
         sys.exit(1)
 
     print(f"Loading cached finance data from {cache_file.name}...")

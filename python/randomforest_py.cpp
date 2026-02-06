@@ -6945,10 +6945,22 @@ except Exception as e:
     }
     
     // ============================================================================
-    // IMPUTATION FUNCTIONS - DISABLED (using Python-only rfx_impute.py instead)
+    // IMPUTATION FUNCTIONS - imported from rfx_impute.py so they're accessible
+    // via: import RFXFuse as rfx; rfx.rfx_impute_rough(...)
     // ============================================================================
-    // C++ bindings removed. Use Python module rfx_impute.py for imputation:
-    //   from rfx_impute import rfx_impute_rough, rfx_impute_rand, rfx_impute_proximity
+    try {
+        py::module_ impute_mod = py::module_::import("rfx_impute");
+        m.attr("impute") = impute_mod.attr("rfx_impute");
+        m.attr("impute_rough") = impute_mod.attr("rfx_impute_rough");
+        m.attr("impute_rand") = impute_mod.attr("rfx_impute_rand");
+        m.attr("impute_proximity") = impute_mod.attr("rfx_impute_proximity");
+        m.attr("impute_topk_mean") = impute_mod.attr("rfx_impute_topk_mean");
+        m.attr("impute_topk_median") = impute_mod.attr("rfx_impute_topk_median");
+        m.attr("impute_knn_mean") = impute_mod.attr("rfx_impute_knn_mean");
+        m.attr("impute_knn_median") = impute_mod.attr("rfx_impute_knn_median");
+    } catch (...) {
+        // rfx_impute.py not available - imputation functions won't be on module
+    }
     // ============================================================================
         
         // Make functions available on module by directly exposing them

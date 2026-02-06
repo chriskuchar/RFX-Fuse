@@ -98,8 +98,10 @@ struct RFConfig {
     // CPU multi-threading
     integer_t n_threads_cpu = 0;  // Number of CPU threads (0 = auto-detect, use all available cores)
     
-    // Histogram binning for GPU (set by fit_batch_gpu when histogram data is available)
-    bool use_histogram = false;   // Whether to use histogram-based split finding on GPU
+    // Histogram binning for CPU/GPU split finding
+    // IMPORTANT: Must be true for correct handling of binary/low-cardinality features
+    // When false, CPU uses sorting-based splits which heavily favor continuous features
+    bool use_histogram = true;    // Whether to use histogram-based split finding
     integer_t n_bins = 256;       // Number of bins for histogram (max 256 for uint8_t storage)
 
     // Helper methods

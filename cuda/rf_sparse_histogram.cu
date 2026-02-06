@@ -500,8 +500,8 @@ __device__ void gpu_sparse_histogram_find_split_classification(
         
         if (crit > best) {
             best = crit;
-            // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-            best_thresh = (bin_edges[b] + bin_edges[b + 1]) / 2.0f;
+            // FIX: Split point is at upper edge of bin b (boundary between bin b and bin b+1)
+            best_thresh = bin_edges[b + 1];
             found = 1;
         }
     }
@@ -557,8 +557,8 @@ __device__ void gpu_sparse_histogram_find_split_regression(
         
         if (weighted_mse < best) {
             best = weighted_mse;
-            // Use MIDPOINT between edges to avoid off-by-one error with <= comparison
-            best_thresh = (bin_edges[b] + bin_edges[b + 1]) / 2.0f;
+            // FIX: Split point is at upper edge of bin b (boundary between bin b and bin b+1)
+            best_thresh = bin_edges[b + 1];
             found = 1;
         }
     }

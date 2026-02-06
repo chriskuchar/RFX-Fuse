@@ -90,7 +90,7 @@ elif os.path.exists('README.md'):
 
 setup(
     name='rfx-fuse-cpu',
-    version='1.0.0',
+    version='1.0.1',
     author='Chris Kuchar',
     author_email='chrisjkuchar@gmail.com',
     description="RFX-Fuse: Breiman and Cutler's Unified ML Engine (CPU-only, no CUDA required)",

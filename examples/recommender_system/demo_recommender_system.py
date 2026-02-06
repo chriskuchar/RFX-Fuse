@@ -135,7 +135,8 @@ def load_movielens_cached(max_items=0, max_users=0):
     
     if not cache_file.exists():
         print(f"ERROR: Cache file not found: {cache_file}")
-        print("Please run test_arxiv_paper_claim7_user_item_pairs.py first to generate cache.")
+        print("Please download MovieLens 25M from https://grouplens.org/datasets/movielens/25m/")
+        print(f"and place movies.csv and ratings.csv in: {PROJECT_ROOT / 'data' / 'ml-25m'}")
         sys.exit(1)
     
     print(f"Loading cached MovieLens data from {cache_file.name}...")

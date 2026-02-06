@@ -748,7 +748,17 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
         if (config_.compute_proximity && config_.use_qlora) {
             config_.use_qlora = false;  // Disable qlora, but keep proximity enabled (use dense matrix)
         }
-        
+
+        // Initialize y_train_regression_int_ for parallel CPU mode
+        // This must be done BEFORE the parallel loop since grow_tree_single only initializes it lazily
+        const real_t y_scale = 1000.0f;
+        if (y_train_regression_int_.empty()) {
+            y_train_regression_int_.resize(y_train_regression_.size());
+            for (size_t i = 0; i < y_train_regression_.size(); ++i) {
+                y_train_regression_int_[i] = static_cast<integer_t>(y_train_regression_[i] * y_scale);
+            }
+        }
+
         // Allocate leaf_assignments_ if requested (CPU mode)
         if (config_.compute_leaf_assignments && leaf_assignments_.empty()) {
             // Cast to size_t to avoid integer overflow with large ntree * nsample
@@ -854,7 +864,23 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
                                nodeclass, cat_.data(), nodestatus, catgoleft,
                                config_.nsample, config_.mdim, nnode_[itree], config_.maxcat,
                                local_jtr.data(), local_nodextr.data());
-                    
+
+                    // Accumulate OOB predictions for regression (parallel-safe)
+                    if (config_.task_type == TaskType::REGRESSION) {
+                        for (integer_t n = 0; n < config_.nsample; ++n) {
+                            if (local_nin[n] == 0) {  // OOB sample
+                                integer_t terminal_node = local_nodextr[n];
+                                if (terminal_node >= 0 && terminal_node < nnode_[itree]) {
+                                    real_t regression_prediction = nodepred[terminal_node];
+                                    #pragma omp atomic
+                                    oob_predictions_[n] += regression_prediction;
+                                    #pragma omp atomic
+                                    nout_[n] += 1;
+                                }
+                            }
+                        }
+                    }
+
                     // Progress callback
                     integer_t completed = ++trees_completed;
                     if (progress_callback_ && completed % std::max(1, config_.ntree / 20) == 0) {
@@ -3252,13 +3278,28 @@ void RandomForest::setup_classification_task(const integer_t* y) {
     // For classification, determine number of classes
     std::set<integer_t> unique_classes(y, y + config_.nsample);
     config_.nclass = static_cast<integer_t>(unique_classes.size());
-    
-    // Store class labels directly (0-based)
+
+    // Build label mapping: original → 0-based, and reverse
+    // This handles non-contiguous labels like {1, 3, 7} → {0, 1, 2}
+    zero_based_to_original_label_map_.assign(unique_classes.begin(), unique_classes.end());
+    original_to_0based_label_map_.clear();
+    for (integer_t idx = 0; idx < config_.nclass; ++idx) {
+        original_to_0based_label_map_[zero_based_to_original_label_map_[idx]] = idx;
+    }
+
+    // Remap labels to 0-based
     y_train_classification_1based_.resize(config_.nsample);
     for (integer_t i = 0; i < config_.nsample; ++i) {
-        y_train_classification_1based_[i] = y[i];  // Keep 0-based
+        y_train_classification_1based_[i] = original_to_0based_label_map_[y[i]];
     }
-    
+
+    // Also remap y_train_classification_ (assigned before this call in fit_classification)
+    for (integer_t i = 0; i < config_.nsample; ++i) {
+        if (i < static_cast<integer_t>(y_train_classification_.size())) {
+            y_train_classification_[i] = original_to_0based_label_map_[y_train_classification_[i]];
+        }
+    }
+
     // Ensure mtry is reasonable for classification
     if (config_.mtry == 0) {
         config_.mtry = std::max(1, static_cast<integer_t>(std::sqrt(static_cast<real_t>(config_.mdim))));
@@ -3333,10 +3374,17 @@ void RandomForest::predict_classification(const real_t* X, integer_t nsamples, i
     bool is_training_data = (nsamples == config_.nsample);
     
     if (is_training_data) {
-        // Use stored OOB predictions (calculated during fit())
+        // Use stored OOB predictions (calculated during fit(), stored as 0-based)
+        // Reverse-map back to original labels
         for (integer_t sample = 0; sample < nsamples; ++sample) {
-            if (sample < oob_class_predictions_.size()) {
-                predictions[sample] = oob_class_predictions_[sample];
+            if (sample < static_cast<integer_t>(oob_class_predictions_.size())) {
+                integer_t pred_0based = oob_class_predictions_[sample];
+                if (!zero_based_to_original_label_map_.empty() &&
+                    pred_0based >= 0 && pred_0based < static_cast<integer_t>(zero_based_to_original_label_map_.size())) {
+                    predictions[sample] = zero_based_to_original_label_map_[pred_0based];
+                } else {
+                    predictions[sample] = pred_0based;
+                }
             } else {
                 predictions[sample] = 0; // Default to class 0
             }
@@ -3435,8 +3483,14 @@ void RandomForest::predict_classification(const real_t* X, integer_t nsamples, i
                     predicted_class = c;
                 }
             }
-            
-            predictions[sample] = predicted_class;
+
+            // Reverse-map 0-based prediction back to original label
+            if (!zero_based_to_original_label_map_.empty() &&
+                predicted_class >= 0 && predicted_class < static_cast<integer_t>(zero_based_to_original_label_map_.size())) {
+                predictions[sample] = zero_based_to_original_label_map_[predicted_class];
+            } else {
+                predictions[sample] = predicted_class;
+            }
         }
     }
 }
@@ -4677,8 +4731,9 @@ std::vector<std::pair<integer_t, real_t>> RandomForest::get_top_k_similar(
         }
     }
     
-    // Convert counts to similarity scores (fraction of trees)
-    real_t norm = 1.0f / static_cast<real_t>(config_.ntree);
+    // Convert counts to similarity scores (fraction of OOB trees where query was out-of-bag)
+    // FIX: Normalize by number of OOB trees used, not total trees
+    real_t norm = 1.0f / static_cast<real_t>(oob_trees_for_query.size());
     
     // Find top-K using partial sort
     // Create index-score pairs for sorting

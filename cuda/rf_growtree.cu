@@ -677,8 +677,8 @@ __device__ void gpu_histogram_find_split_regression_device(
     }
     
     best_crit = best_mse;
-    // Use midpoint between bin edges
-    best_split_value = (bin_edges[best_bin] + bin_edges[best_bin + 1]) / 2.0f;
+    // FIX: Split point is at upper edge of best_bin (boundary between bin b and bin b+1)
+    best_split_value = bin_edges[best_bin + 1];
 }
 
 // ============================================================================
