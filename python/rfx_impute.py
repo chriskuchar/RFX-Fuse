@@ -271,20 +271,25 @@ def rfx_impute(
                     # Classification for categorical
                     # Convert to integer classes
                     classes = np.unique(y_train)
-                    y_train_int = np.searchsorted(classes, y_train).astype(np.int32)
-                    
-                    model = RandomForestClassifier(
-                        ntree=n_trees,
-                        mtry=mtry,
-                        nodesize=5,
-                        use_gpu=use_gpu_actual,
-                        compute_importance=False,
-                        compute_proximity=False,
-                        show_progress=False,
-                    )
-                    model.fit(X_train, y_train_int)
-                    y_pred_int = model.predict(X_test)
-                    y_pred = classes[y_pred_int.astype(int)]
+
+                    if len(classes) < 2:
+                        # Only 1 unique class — just fill with that value
+                        y_pred = np.full(n_missing_j, classes[0])
+                    else:
+                        y_train_int = np.searchsorted(classes, y_train).astype(np.int32)
+
+                        model = RandomForestClassifier(
+                            ntree=n_trees,
+                            mtry=mtry,
+                            nodesize=5,
+                            use_gpu=use_gpu_actual,
+                            compute_importance=False,
+                            compute_proximity=False,
+                            show_progress=False,
+                        )
+                        model.fit(X_train, y_train_int)
+                        y_pred_int = model.predict(X_test)
+                        y_pred = classes[y_pred_int.astype(int)]
                 else:
                     # Regression for numeric
                     model = RandomForestRegressor(
