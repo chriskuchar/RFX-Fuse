@@ -222,21 +222,18 @@ For complete API documentation with all parameters, methods, and examples, see *
 ## Methodology
 
 For detailed methodology, see:
-- **Zenodo:** [https://doi.org/10.5281/zenodo.18397354](https://doi.org/10.5281/zenodo.18397354)
-- **arXiv:** submission #7171299 (submitted Jan 20, 2026)
+- **arXiv:** [https://arxiv.org/html/2603.13234v1](https://arxiv.org/html/2603.13234v1)
 
 ## Citation
 
 ```bibtex
-@software{kuchar2026rfxfuse,
+@article{kuchar2026rfxfuse,
   author       = {Kuchar, Chris},
   title        = {RFX-Fuse: Breiman and Cutler's Unified ML Engine + Native Explainable Similarity},
   year         = {2026},
-  publisher    = {Zenodo},
-  doi          = {10.5281/zenodo.18397354},
-  url          = {https://doi.org/10.5281/zenodo.18397354}
+  journal      = {arXiv preprint arXiv:2511.19493},
+  url          = {https://arxiv.org/html/2603.13234v1}
 }
-```
 
 ## Acknowledgments
 
