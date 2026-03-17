@@ -233,7 +233,8 @@ For detailed methodology, see:
   year         = {2026},
   journal      = {arXiv preprint arXiv:2511.19493},
   url          = {https://arxiv.org/html/2603.13234v1}
-}```
+}
+```
 
 ## Acknowledgments
 
