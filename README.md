@@ -5,7 +5,6 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![C++17](https://img.shields.io/badge/C++-17-00599C.svg?logo=cplusplus)](https://en.cppreference.com/w/cpp/17)
 [![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-toolkit)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18397354.svg)](https://doi.org/10.5281/zenodo.18397354)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.13234-b31b1b.svg)](https://arxiv.org/html/2603.13234v1)
 
 **RFX-Fuse** (Random Forests X [X=compression] — Forest Unified Learning and Similarity Engine) delivers Breiman and Cutler's complete vision for Random Forests as a Forests Unified Machine Learning and Similarity Engine with native GPU/CPU support.
