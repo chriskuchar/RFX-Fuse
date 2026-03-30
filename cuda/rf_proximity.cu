@@ -34,13 +34,14 @@ __global__ void cuda_proximity_kernel(
     rf::integer_t nsample, rf::integer_t nnode, rf::dp_t* prox,
     const rf::integer_t* nod, const rf::integer_t* ncount, const rf::integer_t* ncn,
     const rf::integer_t* nodexb, const rf::integer_t* ndbegin, const rf::integer_t* npcase,
-    bool use_casewise) {
+    bool use_casewise,
+    rf::integer_t n_real) {
     
-    // Use 2D thread indexing for better memory coalescing
     int i = blockIdx.y * blockDim.y + threadIdx.y;
     int j = blockIdx.x * blockDim.x + threadIdx.x;
     
-    if (i >= nsample || j >= nsample) return;
+    rf::integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
+    if (i >= prox_nsample || j >= prox_nsample) return;
     
     // Proximity computation: OOB sample i to in-bag sample j in the same terminal node
     // Case-wise: prox(i, j) = prox(i, j) + nin[j]/nodesize (bootstrap frequency weighted)
@@ -74,10 +75,12 @@ __global__ void cuda_batch_proximity_kernel(
     rf::integer_t nsample, rf::integer_t nnode, rf::dp_t* prox,
     const rf::integer_t* nod, const rf::integer_t* ncount, const rf::integer_t* ncn,
     const rf::integer_t* nodexb, const rf::integer_t* ndbegin, const rf::integer_t* npcase,
-    bool use_casewise) {
+    bool use_casewise,
+    rf::integer_t n_real) {
     
+    rf::integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
-    if (tid >= nsample) return;
+    if (tid >= prox_nsample) return;
     
     // Only process OOB samples (nin[tid] == 0)
     if (nin[tid] != 0) return;
@@ -112,13 +115,13 @@ __global__ void cuda_batch_proximity_kernel(
     for (rf::integer_t j = ndbegin[k]; j < end_idx; ++j) {
         if (j >= 0 && j < nsample) {
             rf::integer_t kk = npcase[j];
-            if (kk >= 0 && kk < nsample && nin[kk] > 0) {  // In-bag case
+            if (kk >= 0 && kk < nsample && nin[kk] > 0) {
+                if (n_real > 0 && kk >= n_real) continue;
                 rf::dp_t weight = use_casewise && nodesize > 0 ?
                     static_cast<rf::dp_t>(nin[kk]) / static_cast<rf::dp_t>(nodesize) :
                     1.0;
-                // Column-major, 0-based: prox[tid + kk * nsample] = row tid, column kk
-                rf::integer_t prox_idx = tid + kk * nsample;
-                if (prox_idx >= 0 && prox_idx < nsample * nsample) {
+                rf::integer_t prox_idx = tid + kk * prox_nsample;
+                if (prox_idx >= 0 && prox_idx < prox_nsample * prox_nsample) {
                     ::atomicAdd(&prox[prox_idx], weight);
                 }
             }
@@ -347,7 +350,7 @@ void gpu_proximity(const rf::integer_t* nodestatus, const rf::integer_t* nodextr
         cuda_proximity_kernel<<<grid_size, block_size>>>(
             nodestatus_d, nodextr_d, nin_d, nsample, nnode, prox_d, 
             nod_d, ncount_d, ncn_d, nodexb_d, ndbegin_d, npcase_d,
-            use_casewise
+            use_casewise, g_config.n_real_samples
         );
         
         CUDA_CHECK_VOID(cudaStreamSynchronize(0));  // Use stream sync for Jupyter safety
@@ -415,7 +418,7 @@ void gpu_proximity(const rf::integer_t* nodestatus, const rf::integer_t* nodextr
         cuda_batch_proximity_kernel<<<grid_size, block_size>>>(
             nodestatus_d, nodextr_d, nin_d, nsample, nnode, prox_d, 
             nod_d, ncount_d, ncn_d, nodexb_d, ndbegin_d, npcase_d,
-            use_casewise
+            use_casewise, g_config.n_real_samples
         );
         
         CUDA_CHECK_VOID(cudaStreamSynchronize(0));  // Use stream sync for Jupyter safety
@@ -634,22 +637,21 @@ __global__ void cuda_proximity_rfgap_kernel(
 // Optimized GPU kernel for RF-GAP with better memory coalescing
 // Uses warp-level primitives for better performance
 __global__ void cuda_proximity_rfgap_kernel_optimized(
-    const rf::integer_t* tree_nin_flat,      // [tree * nsample + sample] = bootstrap multiplicity
-    const rf::integer_t* tree_nodextr_flat,  // [tree * nsample + sample] = terminal node index
+    const rf::integer_t* tree_nin_flat,
+    const rf::integer_t* tree_nodextr_flat,
     rf::integer_t ntree,
     rf::integer_t nsample,
-    rf::dp_t* prox) {
+    rf::dp_t* prox,
+    rf::integer_t n_real) {
     
-    // Each thread processes one sample i
+    rf::integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= nsample) return;
+    if (i >= prox_nsample) return;
     
-    // Initialize proximity row for sample i
-    for (int j = 0; j < nsample; ++j) {
-        prox[i * nsample + j] = 0.0;
+    for (int j = 0; j < prox_nsample; ++j) {
+        prox[i * prox_nsample + j] = 0.0;
     }
     
-    // Find trees where sample i is OOB (Si) - use warp shuffle for efficiency
     rf::integer_t num_trees_oob_i = 0;
     for (rf::integer_t t = 0; t < ntree; ++t) {
         rf::integer_t nin_idx = t * nsample + i;
@@ -659,65 +661,42 @@ __global__ void cuda_proximity_rfgap_kernel_optimized(
     }
     
     if (num_trees_oob_i == 0) {
-        // Sample i is never OOB, set diagonal to 1.0 (self-proximity)
-        prox[i * nsample + i] = 1.0;
+        prox[i * prox_nsample + i] = 1.0;
         return;
     }
     
-    // For each tree t where i is OOB
     for (rf::integer_t t = 0; t < ntree; ++t) {
         rf::integer_t nin_idx = t * nsample + i;
-        if (tree_nin_flat[nin_idx] != 0) {
-            continue;  // i is not OOB in this tree
-        }
+        if (tree_nin_flat[nin_idx] != 0) continue;
         
-        // Get terminal node for OOB sample i in tree t
         rf::integer_t nodextr_idx = t * nsample + i;
         rf::integer_t terminal_node_i = tree_nodextr_flat[nodextr_idx];
+        if (terminal_node_i < 0) continue;
         
-        if (terminal_node_i < 0) {
-            continue;  // Invalid terminal node
-        }
-        
-        // First pass: compute |Mi(t)| = sum of multiplicities of in-bag samples in this node
-        // Use parallel reduction within warp for better performance
         rf::integer_t total_inbag_multiplicity = 0;
         for (rf::integer_t j = 0; j < nsample; ++j) {
-            rf::integer_t nin_j_idx = t * nsample + j;
-            rf::integer_t nodextr_j_idx = t * nsample + j;
-            rf::integer_t cj_t = tree_nin_flat[nin_j_idx];
-            
-            if (cj_t > 0 && tree_nodextr_flat[nodextr_j_idx] == terminal_node_i) {
+            rf::integer_t cj_t = tree_nin_flat[t * nsample + j];
+            if (cj_t > 0 && tree_nodextr_flat[t * nsample + j] == terminal_node_i) {
                 total_inbag_multiplicity += cj_t;
             }
         }
         
-        if (total_inbag_multiplicity == 0) {
-            continue;  // No in-bag samples in this terminal node
-        }
+        if (total_inbag_multiplicity == 0) continue;
         
-        // Second pass: accumulate contributions to pGAP(i, j)
-        // Use coalesced memory access pattern
         rf::dp_t inv_total = 1.0 / static_cast<rf::dp_t>(total_inbag_multiplicity);
-        for (rf::integer_t j = 0; j < nsample; ++j) {
-            rf::integer_t nin_j_idx = t * nsample + j;
-            rf::integer_t nodextr_j_idx = t * nsample + j;
-            rf::integer_t cj_t = tree_nin_flat[nin_j_idx];
-            
-            if (cj_t > 0 && tree_nodextr_flat[nodextr_j_idx] == terminal_node_i) {
-                // j is in-bag and in the same terminal node as i
-                // Add cj(t) / |Mi(t)| to pGAP(i, j)
+        for (rf::integer_t j = 0; j < prox_nsample; ++j) {
+            rf::integer_t cj_t = tree_nin_flat[t * nsample + j];
+            if (cj_t > 0 && tree_nodextr_flat[t * nsample + j] == terminal_node_i) {
                 rf::dp_t contribution = static_cast<rf::dp_t>(cj_t) * inv_total;
-                prox[i * nsample + j] += contribution;
+                prox[i * prox_nsample + j] += contribution;
             }
         }
     }
     
-    // Normalize by |Si|
     if (num_trees_oob_i > 0) {
         rf::dp_t inv_num_trees = 1.0 / static_cast<rf::dp_t>(num_trees_oob_i);
-        for (rf::integer_t j = 0; j < nsample; ++j) {
-            prox[i * nsample + j] *= inv_num_trees;
+        for (rf::integer_t j = 0; j < prox_nsample; ++j) {
+            prox[i * prox_nsample + j] *= inv_num_trees;
         }
     }
 }
@@ -761,7 +740,7 @@ void gpu_proximity_rfgap(
     
     // Use optimized kernel for better performance
     cuda_proximity_rfgap_kernel_optimized<<<grid_size, block_size>>>(
-        tree_nin_d, tree_nodextr_d, ntree, nsample, prox_d
+        tree_nin_d, tree_nodextr_d, ntree, nsample, prox_d, g_config.n_real_samples
     );
     
     CUDA_CHECK_VOID(cudaStreamSynchronize(0));  // Use stream sync for Jupyter safety

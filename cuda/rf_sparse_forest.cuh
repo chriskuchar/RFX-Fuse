@@ -57,6 +57,8 @@ struct GpuSparseForestConfig {
     integer_t n_bins = 256;         // Number of bins for histogram (default: 256)
     // Batching parameters (for memory efficiency with large datasets)
     integer_t batch_size = 0;       // Trees per batch (0 = auto, -1 = all at once)
+    // Unsupervised: number of real samples (0 = all real)
+    integer_t n_real_samples = 0;
 };
 
 /**

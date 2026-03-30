@@ -382,11 +382,18 @@ void RandomForest::initialize_arrays() {
     // Allocate variable type array (default: all quantitative)
     cat_.resize(config_.mdim, 1);
 
-    // Allocate ties and sorted indices - use assign() to ensure all elements are zeroed
-    // Cast to size_t to avoid integer overflow
-    size_t ties_size = static_cast<size_t>(config_.mdim) * static_cast<size_t>(config_.nsample);
-    ties_.assign(ties_size, 0);
-    asave_.assign(ties_size, 0);
+    // ties_ and asave_ hold CPU-side sorted indices for split finding.
+    // GPU computes its own presorted indices and histogram bins on-device,
+    // so these are unused by gpu_growtree_batch. However, prepare_data()
+    // (called by fit_classification/fit_regression) writes into them, so
+    // they must be allocated unless we know prepare_data() will be skipped.
+    // For unsupervised GPU, prepare_data() IS skipped — safe to omit.
+    bool skip_ties_alloc = config_.use_gpu && config_.use_unsupervised;
+    if (!skip_ties_alloc) {
+        size_t ties_size = static_cast<size_t>(config_.mdim) * static_cast<size_t>(config_.nsample);
+        ties_.assign(ties_size, 0);
+        asave_.assign(ties_size, 0);
+    }
 
     // Initialize workspace arrays (to avoid repeated allocation/deallocation)
     initialize_workspace_arrays();
@@ -402,8 +409,9 @@ void RandomForest::initialize_arrays() {
         bool use_upper_triangle = true;  // Default to true for memory efficiency
         
         if (!(use_lowrank && use_upper_triangle)) {
-            // Traditional full matrix allocation for small datasets or when qlora disabled
-            proximity_matrix_.assign(static_cast<size_t>(config_.nsample) * config_.nsample, 0.0);
+            // For unsupervised, proximity only covers real samples
+            integer_t prox_dim = (config_.n_real_samples > 0) ? config_.n_real_samples : config_.nsample;
+            proximity_matrix_.assign(static_cast<size_t>(prox_dim) * prox_dim, 0.0);
         }
         // For low-rank mode, proximity_matrix_ will be allocated later in GPU code
     }
@@ -1049,38 +1057,28 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
     if (n_synthetic_ < 1) n_synthetic_ = 1;  // At least 1 synthetic sample
     n_total_unsupervised_ = n_real + n_synthetic_;
     
-    // Expand feature matrix: [real_samples; synthetic_samples]
-    X_unsupervised_expanded_.resize(n_total_unsupervised_ * config_.mdim);
-    
-    // Copy real data (first n_real samples)
-    std::copy(X, X + n_real * config_.mdim, X_unsupervised_expanded_.begin());
-    
-    // Create synthetic data by permuting each feature independently
-    // This destroys feature correlations - key to Breiman-Cutler unsupervised RF
-    // OPTIMIZED: Parallelize across features (each feature is independent)
-    
+    // CPU path: build expanded matrix with shuffled features on host.
+    // GPU path: skip — synthetic data will be generated directly on GPU.
+    if (!config_.use_gpu) {
+        X_unsupervised_expanded_.resize(n_total_unsupervised_ * config_.mdim);
+        std::copy(X, X + n_real * config_.mdim, X_unsupervised_expanded_.begin());
+
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(static)
+        #pragma omp parallel for schedule(static)
 #endif
-    for (integer_t k = 0; k < config_.mdim; ++k) {
-        // Thread-local RNG seeded deterministically per feature for reproducibility
-        std::mt19937 rng(config_.iseed + k * 1000003);  // Different seed per feature
-        
-        // Extract this feature's values from real samples
-        std::vector<real_t> feature_values(n_real);
-        for (integer_t i = 0; i < n_real; ++i) {
-            feature_values[i] = X[i * config_.mdim + k];  // Row-major: sample i, feature k
-        }
-        
-        // Shuffle the feature values
-        std::shuffle(feature_values.begin(), feature_values.end(), rng);
-        
-        // Sample n_synthetic values (with or without replacement based on ratio)
-        for (integer_t i = 0; i < n_synthetic_; ++i) {
-            integer_t sample_idx = (config_.synthetic_ratio <= 1.0f) 
-                ? i % n_real  // Without replacement for ratio <= 1
-                : rng() % n_real;  // With replacement for oversampling
-            X_unsupervised_expanded_[(n_real + i) * config_.mdim + k] = feature_values[sample_idx];
+        for (integer_t k = 0; k < config_.mdim; ++k) {
+            std::mt19937 rng(config_.iseed + k * 1000003);
+            std::vector<real_t> feature_values(n_real);
+            for (integer_t i = 0; i < n_real; ++i) {
+                feature_values[i] = X[i * config_.mdim + k];
+            }
+            std::shuffle(feature_values.begin(), feature_values.end(), rng);
+            for (integer_t i = 0; i < n_synthetic_; ++i) {
+                integer_t sample_idx = (config_.synthetic_ratio <= 1.0f)
+                    ? i % n_real
+                    : rng() % n_real;
+                X_unsupervised_expanded_[(n_real + i) * config_.mdim + k] = feature_values[sample_idx];
+            }
         }
     }
     
@@ -1099,6 +1097,8 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
     
     // Update config to use expanded data size
     config_.nsample = n_total_unsupervised_;
+    config_.n_real_samples = n_real;
+    rf::g_config.n_real_samples = n_real;
 
     // Update maxnode for expanded sample count (trees need more nodes)
     config_.maxnode = calculate_maxnode(config_.nsample, config_.minndsize);
@@ -1111,8 +1111,13 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
     // This allocates nout_, ties_, asave_, proximity_matrix_, importance arrays, etc.
     initialize_arrays();
 
-    // Prepare data (sort, create ties)
-    prepare_data();
+    // Prepare data (sort, create ties) — CPU only.
+    // GPU computes its own sorted indices (gpu_presort_features_kernel)
+    // and histogram bins (gpu_compute_dense_bin_edges + gpu_bin_dense_data).
+    // The ties_ and asave_ arrays produced here are unused by the GPU kernel.
+    if (!config_.use_gpu) {
+        prepare_data();
+    }
 
     // CPU mode: Use sequential CPU for ANY number of trees when GPU is disabled
     // GPU mode: Always use GPU batch mode (auto-scaling)
@@ -1192,21 +1197,12 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
         // std::cout << "[FIT_UNSUPERVISED] About to call fit_batch_gpu with batch_size=" << batch_size 
         //           << ", use_casewise=" << config_.use_casewise << std::endl;  // Commented to avoid stream conflicts with Python progress bars
         
-        // For unsupervised GPU, use EXPANDED data (real + synthetic)
-        // This matches CPU behavior where grow_tree_single uses X_unsupervised_expanded_
-        // CRITICAL: Update config_.nsample to expanded size BEFORE fit_batch_gpu
-        integer_t original_nsample = config_.nsample;  // Save original for restore
-        config_.nsample = n_total_unsupervised_;  // Use expanded sample count
-        
-        // Expand sample weights for synthetic samples (weight = 1.0)
-        std::vector<real_t> expanded_weights(n_total_unsupervised_, 1.0f);
-        for (integer_t i = 0; i < original_nsample; ++i) {
-            expanded_weights[i] = sample_weight_[i];
-        }
+        // GPU unsupervised: pass REAL data only; synthetic generated on GPU.
+        // config_.nsample is already n_total_unsupervised_ (set above at line 1101).
         
 #ifdef CUDA_FOUND
-        fit_batch_gpu(X_unsupervised_expanded_.data(), y_train_unsupervised_.data(), 
-                      expanded_weights.data(), batch_size);
+        fit_batch_gpu(X, y_train_unsupervised_.data(),
+                      sample_weight_.data(), batch_size);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -1219,7 +1215,7 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
         finalize_training();
         
         // Restore original nsample for user queries (they expect original sample count)
-        config_.nsample = original_nsample;
+        config_.nsample = n_real;
         // std::cout << "[FIT_UNSUPERVISED] fit_batch_gpu completed successfully" << std::endl;  // Commented to avoid stream conflicts with Python progress bars
     }
 
@@ -2081,6 +2077,11 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
         // The actual allocation happens in the first call to gpu_growtree_batch
         // We just set a flag here to indicate histogram should be used on GPU
         rf::g_config.use_histogram = true;
+    } else if (config_.use_histogram && config_.use_gpu) {
+        // GPU unsupervised path: prepare_data() was skipped so histogram_data_
+        // is null, but gpu_growtree_batch computes GPU-native histograms from
+        // raw X data (gpu_compute_dense_bin_edges + gpu_bin_dense_data).
+        rf::g_config.use_histogram = true;
     } else {
         rf::g_config.use_histogram = false;
     }
@@ -2230,8 +2231,11 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
         }
         
         // Prepare histogram data pointers (if enabled and available)
-        bool use_hist_gpu = config_.use_histogram && histogram_data_ && histogram_data_->is_valid;
-        const uint8_t* X_binned_ptr = use_hist_gpu ? histogram_data_->X_binned.data() : nullptr;
+        // When prepare_data() was skipped (GPU unsupervised), histogram_data_ is
+        // null but gpu_growtree_batch computes GPU-native histograms from raw X.
+        bool have_cpu_hist = histogram_data_ && histogram_data_->is_valid;
+        bool use_hist_gpu = config_.use_histogram && (have_cpu_hist || config_.use_gpu);
+        const uint8_t* X_binned_ptr = have_cpu_hist ? histogram_data_->X_binned.data() : nullptr;
         const real_t* bin_edges_ptr = nullptr;
         const integer_t* n_bins_ptr = nullptr;
         std::vector<real_t> bin_edges_flat;
@@ -2240,14 +2244,12 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
         // GPU kernel supports up to 256 bins with 10 classes in shared memory
         const integer_t GPU_HIST_MAX_BINS = 256;
         
-        if (use_hist_gpu) {
-            // Flatten bin_edges for GPU: [mdim × 257]
-            // Cast to size_t to avoid integer overflow
+        if (use_hist_gpu && have_cpu_hist) {
+            // CPU histogram available: flatten bin_edges for GPU transfer
             size_t bin_edges_size = static_cast<size_t>(config_.mdim) * 257;
             bin_edges_flat.resize(bin_edges_size, 0.0f);
             n_bins_vec.resize(config_.mdim);
             for (integer_t f = 0; f < config_.mdim; ++f) {
-                // Cap n_bins at GPU_HIST_MAX_BINS for GPU kernel shared memory limits
                 integer_t cpu_bins = histogram_data_->feature_info[f].n_bins;
                 n_bins_vec[f] = std::min(cpu_bins, GPU_HIST_MAX_BINS);
                 for (integer_t e = 0; e < 257; ++e) {
@@ -2257,6 +2259,8 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
             bin_edges_ptr = bin_edges_flat.data();
             n_bins_ptr = n_bins_vec.data();
         }
+        // else: use_hist_gpu is true but no CPU hist (GPU unsupervised path) —
+        // gpu_growtree_batch will compute GPU-native histograms from raw X data
         
         // Pass offset pointers for persistent arrays (they contain ALL trees)
         // Cast to size_t to avoid integer overflow in pointer arithmetic
@@ -3116,7 +3120,8 @@ void RandomForest::fit_sparse_gpu_unsupervised(const SparseMatrixCSR& X,
     gpu_config.task_type = 2;  // Unsupervised (classification-based)
     gpu_config.use_histogram = config_.use_histogram;
     gpu_config.n_bins = config_.n_bins;
-    gpu_config.batch_size = config_.batch_size;  // Batched training support
+    gpu_config.batch_size = config_.batch_size;
+    gpu_config.n_real_samples = config_.n_real_samples;
     
     // Allocate output arrays
     // Cast to size_t to avoid integer overflow with large ntree * maxnode
@@ -5333,6 +5338,8 @@ void RandomForest::fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_
     
     // Update config with combined dimensions
     config_.nsample = n_total_unsupervised_;
+    config_.n_real_samples = n_real;
+    rf::g_config.n_real_samples = n_real;
     config_.mdim = mdim;
     config_.nclass = 2;  // Binary: real vs synthetic
 

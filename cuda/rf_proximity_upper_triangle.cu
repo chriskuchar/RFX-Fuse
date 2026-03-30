@@ -150,37 +150,20 @@ __global__ void cuda_proximity_upper_triangle_fp16_kernel(
     const integer_t* nodexb,
     const integer_t* nin,
     integer_t nsample,
-    integer_t nterm,  // Number of terminal nodes (for bounds checking)
+    integer_t nterm,
     const integer_t* ndbegin,
     const integer_t* npcase,
-    __half* prox_upper_fp16,  // Packed upper triangle (n(n+1)/2 elements)
-    bool use_casewise  // Case-wise: nin[kk]/nodesize, Non-case-wise: 1.0
+    __half* prox_upper_fp16,
+    bool use_casewise,
+    integer_t n_real  // >0: only compute proximity for first n_real samples (unsupervised opt)
 ) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
     
-    // DEBUG: Thread 0 prints kernel entry info
-    // if (tid == 0) {
-    //     integer_t valid_nodexb = 0;
-    //     integer_t invalid_nodexb = 0;
-    //     integer_t oob_count = 0;
-    //     integer_t inbag_count = 0;
-    //     for (int i = 0; i < nsample; ++i) {
-    //         integer_t k = nodexb[i];
-    //         if (k >= 0 && k < nterm) {
-    //             valid_nodexb++;
-    //         } else {
-    //             invalid_nodexb++;
-    //         }
-    //         if (nin[i] == 0) {
-    //             oob_count++;
-    //         } else {
-    //             inbag_count++;
-    //         }
-    //     }
-        // printf("[DEBUG PROXIMITY KERNEL] Entry: nsample=%d, nterm=%d, valid_nodexb=%d, invalid_nodexb=%d, oob=%d, inbag=%d\n",
-        //        nsample, nterm, valid_nodexb, invalid_nodexb, oob_count, inbag_count);
-    // }
+    // For unsupervised: only real samples contribute to proximity.
+    // n_real==0 means all samples are real (classification/regression).
+    integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
+    
     __syncthreads();
     
     integer_t threads_processed = 0;
@@ -191,7 +174,7 @@ __global__ void cuda_proximity_upper_triangle_fp16_kernel(
     integer_t threads_skipped_zero_nodesize = 0;
     integer_t total_updates = 0;
     
-    for (int sample_n = tid; sample_n < nsample; sample_n += stride) {
+    for (int sample_n = tid; sample_n < prox_nsample; sample_n += stride) {
         threads_processed++;
         // Match CPU implementation - only process OOB samples (nin[sample_n] == 0)
         // CPU code (rf_proximity.cpp line 180): if (nin[n] == 0) { // OOB sample
@@ -241,22 +224,18 @@ __global__ void cuda_proximity_upper_triangle_fp16_kernel(
                 if (j < 0 || j >= nsample) continue;  // Bounds check for npcase access
                 integer_t kk = npcase[j];
                 if (kk >= 0 && kk < nsample && nin[kk] > 0) {  // In-bag samples only
-                    // For upper triangle, we need i <= j
-                    // If sample_n <= kk, use (sample_n, kk)
-                    // If sample_n > kk, use (kk, sample_n) - swap to get into upper triangle
+                    // Skip synthetic partner samples for unsupervised
+                    if (n_real > 0 && kk >= n_real) continue;
+                    
                     integer_t i = (sample_n <= kk) ? sample_n : kk;
                     integer_t j_idx = (sample_n <= kk) ? kk : sample_n;
                     
-                    // Calculate weight contribution
-                    // Case-wise: use bootstrap frequency weighting
-                    // Non-case-wise: use simple co-occurrence (1.0)
                     float weight_contrib_float = use_casewise ?
                         static_cast<float>(nin[kk]) / static_cast<float>(nodesize) :
                         1.0f;
                     
-                    integer_t upper_idx = upper_triangle_index(i, j_idx, nsample);
-                    // Bounds check for upper_idx
-                    integer_t max_upper_idx = (nsample * (nsample + 1)) / 2 - 1;
+                    integer_t upper_idx = upper_triangle_index(i, j_idx, prox_nsample);
+                    integer_t max_upper_idx = (prox_nsample * (prox_nsample + 1)) / 2 - 1;
                     if (upper_idx >= 0 && upper_idx <= max_upper_idx) {
                         // Use atomicAdd on unsigned short* (__half is 2 bytes = unsigned short)
                         // Convert weight to __half, then use atomicAdd on the bits
@@ -313,14 +292,17 @@ __global__ void cuda_proximity_upper_triangle_int8_kernel(
     integer_t nterm,
     const integer_t* ndbegin,
     const integer_t* npcase,
-    int8_t* prox_upper_int8,  // Packed upper triangle (n(n+1)/2 elements)
+    int8_t* prox_upper_int8,
     float scale,
-    float zero_point
+    float zero_point,
+    integer_t n_real  // >0: only compute proximity for first n_real samples
 ) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
     
-    for (int sample_n = tid; sample_n < nsample; sample_n += stride) {
+    integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
+    
+    for (int sample_n = tid; sample_n < prox_nsample; sample_n += stride) {
         integer_t k = nodexb[sample_n];
         
         // Validate k before using it in ndbegin[k]
@@ -341,16 +323,15 @@ __global__ void cuda_proximity_upper_triangle_int8_kernel(
         if (nodesize > 0) {
             for (integer_t j = ndbegin[k]; j < ndbegin[k+1]; j++) {
                 integer_t kk = npcase[j];
-                if (kk >= 0 && kk < nsample && nin[kk] > 0) {  // In-bag samples only
-                    // For upper triangle, we need i <= j
-                    // If sample_n <= kk, use (sample_n, kk)
-                    // If sample_n > kk, use (kk, sample_n) - swap to get into upper triangle
+                if (kk >= 0 && kk < nsample && nin[kk] > 0) {
+                    if (n_real > 0 && kk >= n_real) continue;
+                    
                     integer_t i = (sample_n <= kk) ? sample_n : kk;
                     integer_t j_idx = (sample_n <= kk) ? kk : sample_n;
                     
                     float weight_contrib = static_cast<float>(nin[kk]) / static_cast<float>(nodesize);
                     int8_t quantized_weight = QuantizationUtils::fp32_to_int8(weight_contrib, scale, zero_point);
-                    integer_t upper_idx = upper_triangle_index(i, j_idx, nsample);
+                    integer_t upper_idx = upper_triangle_index(i, j_idx, prox_nsample);
                     
                     // atomicAdd on int* requires 4-byte alignment
                     // Align to 4-byte boundary and update the specific byte within the word
@@ -391,11 +372,14 @@ __global__ void cuda_proximity_upper_triangle_nf4_kernel(
     integer_t nterm,
     const integer_t* ndbegin,
     const integer_t* npcase,
-    uint8_t* prox_upper_nf4,  // Packed upper triangle (n(n+1)/2 elements, 2 values per byte)
-    bool use_casewise
+    uint8_t* prox_upper_nf4,
+    bool use_casewise,
+    integer_t n_real  // >0: only compute proximity for first n_real samples
 ) {
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     int stride = blockDim.x * gridDim.x;
+    
+    integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
     
     // DEBUG: Thread 0 prints kernel entry info
     // if (tid == 0) {
@@ -448,74 +432,61 @@ __global__ void cuda_proximity_upper_triangle_nf4_kernel(
     integer_t threads_skipped_zero_nodesize = 0;
     integer_t total_updates = 0;
     
-    for (int sample_n = tid; sample_n < nsample; sample_n += stride) {
+    for (int sample_n = tid; sample_n < prox_nsample; sample_n += stride) {
         threads_processed++;
-        // Match CPU implementation - only process OOB samples (nin[sample_n] == 0)
         if (nin[sample_n] > 0) {
-            continue;  // Skip in-bag samples - only process OOB samples
+            continue;
         }
         
         integer_t k = nodexb[sample_n];
         
-        // Bounds check: k must be a valid terminal node index [0, nterm-1]
         if (k < 0 || k >= nterm) {
             threads_skipped_invalid_nodexb++;
-            continue;  // Skip invalid nodexb entries
+            continue;
         }
         
         integer_t nodesize = 0;
-        // Match CPU exactly: access ndbegin[k+1] with bounds check
         integer_t start_idx = ndbegin[k];
         integer_t end_idx = (k + 1 <= nterm) ? ndbegin[k + 1] : nsample;
-        if (end_idx > nsample) end_idx = nsample;  // Additional safety check
+        if (end_idx > nsample) end_idx = nsample;
         
-        // Minimal bounds check
         if (start_idx < 0 || end_idx < start_idx) {
             threads_skipped_invalid_ndbegin++;
-            continue;  // Skip invalid ndbegin ranges
+            continue;
         }
         
-        // First pass - calculate nodesize (sum of nin[kk] for all in-bag cases in this node)
         for (integer_t j = start_idx; j < end_idx; j++) {
-            if (j < 0 || j >= nsample) continue;  // Bounds check for npcase access
+            if (j < 0 || j >= nsample) continue;
             integer_t kk = npcase[j];
             if (kk >= 0 && kk < nsample && nin[kk] > 0) {
                 nodesize += nin[kk];
             }
         }
         
-        // Second pass - update proximities in packed upper triangle format
-        // Case-wise: weight = nin[kk]/nodesize (if nodesize > 0)
-        // Non-case-wise: weight = 1.0
         if (nodesize > 0 || !use_casewise) {
             integer_t updates_this_sample = 0;
             for (integer_t j = start_idx; j < end_idx; j++) {
-                if (j < 0 || j >= nsample) continue;  // Bounds check for npcase access
+                if (j < 0 || j >= nsample) continue;
                 integer_t kk = npcase[j];
-                // For OOB sample_n, update proximity with in-bag sample kk
                 if (kk >= 0 && kk < nsample && nin[kk] > 0) {
-                    // For upper triangle, we need i <= j
-                    // If sample_n <= kk, use (sample_n, kk)
-                    // If sample_n > kk, use (kk, sample_n) - swap to get into upper triangle
+                    if (n_real > 0 && kk >= n_real) continue;
+                    
                     integer_t i = (sample_n <= kk) ? sample_n : kk;
                     integer_t j_idx = (sample_n <= kk) ? kk : sample_n;
                     
-                    // Calculate weight contribution
                     float weight_contrib_float = use_casewise ?
                         static_cast<float>(nin[kk]) / static_cast<float>(nodesize) :
                         1.0f;
                     
-                    integer_t upper_idx = upper_triangle_index(i, j_idx, nsample);
+                    integer_t upper_idx = upper_triangle_index(i, j_idx, prox_nsample);
                     
-                    // Bounds check for upper_idx
-                    integer_t max_upper_idx = (nsample * (nsample + 1)) / 2 - 1;
+                    integer_t max_upper_idx = (prox_nsample * (prox_nsample + 1)) / 2 - 1;
                     if (upper_idx >= 0 && upper_idx <= max_upper_idx) {
                         // NF4 is packed: 2 values per byte
                         integer_t packed_idx = upper_idx / 2;
                         integer_t bit_offset = (upper_idx % 2) * 4;  // 0 or 4 bits
                         
-                        // Bounds check for packed_idx
-                        integer_t max_packed_idx = ((nsample * (nsample + 1)) / 2 + 1) / 2 - 1;
+                        integer_t max_packed_idx = ((prox_nsample * (prox_nsample + 1)) / 2 + 1) / 2 - 1;
                         if (packed_idx >= 0 && packed_idx <= max_packed_idx) {
                             // atomicCAS requires 4-byte alignment
                             // Align to 4-byte boundary and update the specific byte within the word
@@ -858,8 +829,10 @@ void gpu_proximity_upper_triangle_fp16(
     const integer_t* ndbegin_ptr = ndbegin_local.data();
     const integer_t* npcase_ptr = npcase_local.data();
     
-    // Compute sizes
-    size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+    // For unsupervised, use n_real for proximity dimensions (skip synthetic samples)
+    integer_t n_real = g_config.n_real_samples;
+    integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
+    size_t upper_triangle_size = (static_cast<size_t>(prox_nsample) * (prox_nsample + 1)) / 2;
     
     // For low-rank (QLoRA), we always use upper triangle directly - no need for full matrix
     // This is more memory efficient and avoids unnecessary conversions
@@ -1119,9 +1092,8 @@ void gpu_proximity_upper_triangle_fp16(
     // std::cout << "[DEBUG PROXIMITY KERNEL] About to launch: nsample=" << nsample 
     //           << ", nterm=" << nterm << ", use_casewise=" << use_casewise_val << std::endl;
     
-    // Always use upper triangle kernel directly for low-rank (no full matrix needed)
     cuda_proximity_upper_triangle_fp16_kernel<<<grid_size, block_size>>>(
-        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_fp16_d, use_casewise_val
+        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_fp16_d, use_casewise_val, n_real
     );
     
     // Check kernel execution
@@ -1325,7 +1297,9 @@ void gpu_proximity_upper_triangle_int8(
     // =========================================================================
     // GPU COMPUTATION
     // =========================================================================
-    size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+    integer_t n_real_int8 = g_config.n_real_samples;
+    integer_t prox_nsample_int8 = (n_real_int8 > 0) ? n_real_int8 : nsample;
+    size_t upper_triangle_size = (static_cast<size_t>(prox_nsample_int8) * (prox_nsample_int8 + 1)) / 2;
     
     // Allocate GPU memory
     integer_t* nodexb_d = nullptr;
@@ -1354,7 +1328,7 @@ void gpu_proximity_upper_triangle_int8(
     dim3 grid_size((nsample + block_size.x - 1) / block_size.x);
     
     cuda_proximity_upper_triangle_int8_kernel<<<grid_size, block_size>>>(
-        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_int8_d, scale, zero_point
+        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_int8_d, scale, zero_point, g_config.n_real_samples
     );
     
     CUDA_CHECK_VOID(cudaStreamSynchronize(0));
@@ -1482,8 +1456,9 @@ void gpu_proximity_upper_triangle_nf4(
         }
     }
     
-    // Compute upper triangle size
-    size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+    integer_t n_real_nf4 = g_config.n_real_samples;
+    integer_t prox_nsample_nf4 = (n_real_nf4 > 0) ? n_real_nf4 : nsample;
+    size_t upper_triangle_size = (static_cast<size_t>(prox_nsample_nf4) * (prox_nsample_nf4 + 1)) / 2;
     
     // Check if output pointer is on GPU or CPU
     cudaPointerAttributes out_attrs;
@@ -1538,7 +1513,7 @@ void gpu_proximity_upper_triangle_nf4(
     // std::cout.flush();
     
     cuda_proximity_upper_triangle_nf4_kernel<<<grid_size, block_size>>>(
-        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_nf4_d, use_casewise_val
+        nodexb_d, nin_d, nsample, nterm, ndbegin_d, npcase_d, prox_upper_nf4_d, use_casewise_val, g_config.n_real_samples
     );
     
     // Check kernel launch immediately
@@ -1644,47 +1619,40 @@ void gpu_proximity_upper_triangle(
 // GPU kernel for RF-GAP proximity in upper triangle format
 // Each thread processes one OOB sample i
 __global__ void cuda_proximity_rfgap_upper_triangle_fp16_kernel(
-    const integer_t* nin_tree,      // Bootstrap multiplicities [sample] (0=OOB, >0=in-bag)
-    const integer_t* nodextr_tree,  // Terminal node assignments [sample]
+    const integer_t* nin_tree,
+    const integer_t* nodextr_tree,
     integer_t nsample,
-    __half* prox_upper_fp16  // Packed upper triangle output
+    __half* prox_upper_fp16,
+    integer_t n_real  // >0: only compute proximity for first n_real samples
 ) {
-    // Each thread processes one OOB sample i
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= nsample) return;
     
-    // Skip if sample i is not OOB
+    integer_t prox_nsample = (n_real > 0) ? n_real : nsample;
+    if (i >= prox_nsample) return;
+    
     if (nin_tree[i] != 0) return;
     
-    // Get terminal node for OOB sample i
     integer_t terminal_node_i = nodextr_tree[i];
-    if (terminal_node_i < 0) return;  // Invalid terminal node
+    if (terminal_node_i < 0) return;
     
-    // First pass: compute |Mi(t)| = sum of multiplicities of in-bag samples in this node
     integer_t total_inbag_multiplicity = 0;
     for (integer_t j = 0; j < nsample; ++j) {
         integer_t cj_t = nin_tree[j];
         if (cj_t > 0 && nodextr_tree[j] == terminal_node_i) {
-            // j is in-bag and in the same terminal node as i
             total_inbag_multiplicity += cj_t;
         }
     }
     
-    if (total_inbag_multiplicity == 0) return;  // No in-bag samples in this terminal node
+    if (total_inbag_multiplicity == 0) return;
     
-    // Second pass: accumulate contributions to upper triangle
-    // Only store upper triangle (i <= j) for memory efficiency
     float inv_total = 1.0f / static_cast<float>(total_inbag_multiplicity);
-    for (integer_t j = 0; j < nsample; ++j) {
+    for (integer_t j = 0; j < prox_nsample; ++j) {
         integer_t cj_t = nin_tree[j];
         if (cj_t > 0 && nodextr_tree[j] == terminal_node_i && i <= j) {
-            // j is in-bag, in the same terminal node as i, and in upper triangle
-            // Add cj(t) / |Mi(t)| to pGAP(i, j)
             float contribution = static_cast<float>(cj_t) * inv_total;
-            integer_t upper_idx = upper_triangle_index(i, j, nsample);
-            integer_t max_upper_idx = (nsample * (nsample + 1)) / 2 - 1;
+            integer_t upper_idx = upper_triangle_index(i, j, prox_nsample);
+            integer_t max_upper_idx = (prox_nsample * (prox_nsample + 1)) / 2 - 1;
             if (upper_idx >= 0 && upper_idx <= max_upper_idx) {
-                // Use atomic add for thread safety (though each (i,j) should be unique)
                 float current_val = __half2float(prox_upper_fp16[upper_idx]);
                 float new_val = current_val + contribution;
                 prox_upper_fp16[upper_idx] = __float2half(new_val);
@@ -1711,8 +1679,10 @@ void gpu_proximity_rfgap_upper_triangle_fp16(
     integer_t* nodextr_tree_d;
     __half* prox_upper_d;
     
+    integer_t n_real_rfgap = g_config.n_real_samples;
+    integer_t prox_nsample_rfgap = (n_real_rfgap > 0) ? n_real_rfgap : nsample;
     size_t sample_data_size = static_cast<size_t>(nsample) * sizeof(integer_t);
-    size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+    size_t upper_triangle_size = (static_cast<size_t>(prox_nsample_rfgap) * (prox_nsample_rfgap + 1)) / 2;
     size_t prox_upper_size = upper_triangle_size * sizeof(__half);
     
     CUDA_CHECK_VOID(cudaMalloc(&nin_tree_d, sample_data_size));
@@ -1731,7 +1701,7 @@ void gpu_proximity_rfgap_upper_triangle_fp16(
     dim3 grid_size((nsample + block_size.x - 1) / block_size.x);
     
     cuda_proximity_rfgap_upper_triangle_fp16_kernel<<<grid_size, block_size>>>(
-        nin_tree_d, nodextr_tree_d, nsample, prox_upper_d
+        nin_tree_d, nodextr_tree_d, nsample, prox_upper_d, g_config.n_real_samples
     );
     
     CUDA_CHECK_VOID(cudaStreamSynchronize(0));  // Use stream sync for Jupyter safety
