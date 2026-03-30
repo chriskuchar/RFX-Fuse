@@ -98,6 +98,13 @@ struct RFConfig {
     // CPU multi-threading
     integer_t n_threads_cpu = 0;  // Number of CPU threads (0 = auto-detect, use all available cores)
     
+    // Unsupervised: number of real (non-synthetic) samples.
+    // 0 means all samples are real (classification/regression).
+    // When > 0, proximity kernels restrict computation to the first
+    // n_real_samples rows, and GPU synthetic generation uses this to
+    // know where real data ends and synthetic data begins.
+    integer_t n_real_samples = 0;
+
     // Histogram binning for CPU/GPU split finding
     // IMPORTANT: Must be true for correct handling of binary/low-cardinality features
     // When false, CPU uses sorting-based splits which heavily favor continuous features

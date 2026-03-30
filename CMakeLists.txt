@@ -138,6 +138,7 @@ if(CUDA_AVAILABLE)
         cuda/rf_histogram_gpu.cu
         cuda/rf_sparse_histogram.cu
         cuda/rf_impute.cu
+        cuda/rf_unsupervised_synthetic.cu
     )
 else()
     set(CUDA_SOURCES "")

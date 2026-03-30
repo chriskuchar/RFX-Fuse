@@ -110,6 +110,7 @@ struct RandomForestConfig {
 
     // Unsupervised-specific parameters
     bool use_unsupervised;  // Enable unsupervised mode
+    integer_t n_real_samples = 0;  // Number of real samples (0 = all real, >0 = unsupervised mode)
     real_t outlier_threshold;  // Threshold for outlier detection
     // NOTE: Outlier detection is ON-DEMAND only via compute_outlier_scores(mode='greedy'|'full')
     // Requires compute_leaf_assignments=True. Uses leaf assignments, NOT full proximity matrix.

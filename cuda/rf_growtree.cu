@@ -11,6 +11,7 @@
 #include "rf_proximity_importance.cuh"  // For GPU Dense proximity importance
 #include "rf_data_accessor.cuh"  // Unified dense/sparse data accessor
 #include "rf_histogram_gpu.cuh"  // For GPU dense histogram binning (matches sparse implementation)
+#include "rf_unsupervised_synthetic.cuh"  // GPU synthetic data generation for unsupervised
 // Forward declarations to defer type resolution and avoid static initialization issues
 // Include headers only when CUDA is available - this prevents static init crashes
 #ifdef __CUDACC__
@@ -3255,21 +3256,34 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
     // }
     // std::cout << std::endl;
     
-    // Copy data to GPU (matches backup version with explicit error checking)
+    // Copy feature data to GPU.
+    // For unsupervised (task_type==2) with n_real_samples set, only the real
+    // rows are on the host — synthetic rows are generated on GPU.
     cudaSetDevice(device);
-    cudaGetLastError();  // Clear any errors
+    cudaGetLastError();
     
-    cudaError_t copy_err = cudaMemcpy(x_gpu, x, static_cast<size_t>(nsample) * static_cast<size_t>(mdim) * sizeof(real_t), cudaMemcpyHostToDevice);
+    integer_t n_real_for_synth = g_config.n_real_samples;
+    bool generate_synthetic_on_gpu = (task_type == 2 && n_real_for_synth > 0 && n_real_for_synth < nsample);
     
-    // std::cout << "[GPU_GROWTREE_BATCH] cudaMemcpy complete" << std::endl;
-    // std::cout.flush();  // DISABLED - causes Jupyter crash
+    size_t x_copy_bytes = generate_synthetic_on_gpu
+        ? static_cast<size_t>(n_real_for_synth) * static_cast<size_t>(mdim) * sizeof(real_t)
+        : static_cast<size_t>(nsample) * static_cast<size_t>(mdim) * sizeof(real_t);
+    
+    cudaError_t copy_err = cudaMemcpy(x_gpu, x, x_copy_bytes, cudaMemcpyHostToDevice);
     if (copy_err != cudaSuccess) {
-        // Copy failed - clean up and return
         cudaFree(x_gpu);
         cudaFree(cl_gpu);
         cudaFree(win_gpu);
         cudaFree(seeds_gpu);
         return;
+    }
+    
+    if (generate_synthetic_on_gpu) {
+        integer_t n_synthetic = nsample - n_real_for_synth;
+        cuda::gpu_generate_synthetic_unsupervised(
+            x_gpu, n_real_for_synth, n_synthetic, mdim,
+            seeds[0], compute_stream);
+        cudaStreamSynchronize(compute_stream);
     }
     
     // Check if cl is valid before copying (important for unsupervised learning)
@@ -3612,10 +3626,24 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
         // This correctly handles sparse-like data with many repeated values (like 0s)
         dense_hist_data = new cuda::DenseHistogramData();
         
-        // Compute bin edges on GPU using unique values (like sparse histogram does)
-        cuda::gpu_compute_dense_bin_edges(x_gpu, nsample, mdim, max_bins, *dense_hist_data, compute_stream);
+        // For unsupervised: compute bin edges from real data only (synthetic is a
+        // column-wise permutation of real → identical marginal distributions).
+        // This halves the sort/unique work for bin edge computation.
+        integer_t bin_edge_nsample = (g_config.n_real_samples > 0) ? g_config.n_real_samples : nsample;
+        cuda::gpu_compute_dense_bin_edges(x_gpu, bin_edge_nsample, mdim, max_bins, *dense_hist_data, compute_stream);
         
-        // Bin the data on GPU
+        // Reset nsample in hist_data so gpu_bin_dense_data bins ALL samples
+        // (including synthetic) using the edges derived from real data.
+        if (g_config.n_real_samples > 0) {
+            dense_hist_data->nsample = nsample;
+            // Re-allocate the binned data buffer at full nsample size
+            if (dense_hist_data->d_X_binned) {
+                cudaFree(dense_hist_data->d_X_binned);
+            }
+            cudaMalloc(&dense_hist_data->d_X_binned, static_cast<size_t>(nsample) * mdim * sizeof(uint8_t));
+        }
+        
+        // Bin all samples (real + synthetic) using the computed edges
         cuda::gpu_bin_dense_data(x_gpu, *dense_hist_data, compute_stream);
         
         cudaStreamSynchronize(compute_stream);  // Ensure binning completes
@@ -5086,6 +5114,9 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
         integer_t& total_trees_processed = g_lowrank_state.total_trees_processed;
         integer_t& saved_nsample = g_lowrank_state.saved_nsample;
         
+        // For unsupervised, proximity only covers real samples
+        integer_t prox_dim = (g_config.n_real_samples > 0) ? g_config.n_real_samples : nsample;
+        
         // Allocate proximity workspace arrays
         std::vector<integer_t> nod_workspace(maxnode);
         std::vector<integer_t> ncount_workspace(nsample);
@@ -5141,27 +5172,22 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                 // std::cout << "GPU Proximity: Parameters - nsample=" << nsample 
                 //           << ", rank=100, quant_level=" << static_cast<int>(quant_level) << std::endl;
                 
-                // Validate inputs before creating
-                if (nsample <= 0 || nsample > 1000000) {
-                    // std::cerr << "Error: Invalid nsample for LowRankProximityMatrix: " << nsample << std::endl;
+                if (prox_dim <= 0 || prox_dim > 1000000) {
                     use_lowrank = false;
                 } else {
-                    // Ensure CUDA context is valid before creating handles
                     cudaError_t ctx_check = cudaSetDevice(0);
                     if (ctx_check != cudaSuccess) {
-                        // std::cerr << "Error: Failed to set CUDA device: " << cudaGetErrorString(ctx_check) << std::endl;
                         use_lowrank = false;
                     } else {
-                        // Matches backup version - direct call, no try-catch
                             integer_t max_rank = g_config.lowrank_rank > 0 ? g_config.lowrank_rank : 1000;
-                            integer_t initial_rank = 0;  // Start with rank 0, will grow as trees are added
+                            integer_t initial_rank = 0;
                             integer_t power_iterations = g_config.lowrank_power_iterations > 0 ? g_config.lowrank_power_iterations : 30;
                             rf::cuda::QuantizationLevel quant_level_explicit = 
                                 static_cast<rf::cuda::QuantizationLevel>(quant_mode_int);
                             lowrank_prox_ptr_raw = static_cast<void*>(
-                                new rf::cuda::LowRankProximityMatrix(nsample, initial_rank, quant_level_explicit, max_rank, power_iterations)
+                                new rf::cuda::LowRankProximityMatrix(prox_dim, initial_rank, quant_level_explicit, max_rank, power_iterations)
                             );
-                            saved_nsample = nsample;
+                            saved_nsample = prox_dim;
                     }
                 }
                 
@@ -5205,9 +5231,7 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                         continue;
                     }
                     
-                    // For nsample > 10000: NO CPU temp buffers! Compute directly on GPU
-                    // Allocate GPU memory directly (no CPU allocation)
-                    size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+                    size_t upper_triangle_size = (static_cast<size_t>(prox_dim) * (prox_dim + 1)) / 2;
                     
                     // ALWAYS compute per-tree proximity in FP16 during training
                     // Quantization to INT8/NF4 happens ONLY at the very end via finalize_accumulation()
@@ -5251,7 +5275,7 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                     
                     // Add to low-rank matrix using FP16 directly (no quantization during training!)
                     lowrank_prox_ptr->add_tree_contribution_incremental_upper_triangle_fp16(
-                        tree_prox_upper_gpu, nsample
+                        tree_prox_upper_gpu, prox_dim
                     );
                     
                     // Free GPU memory
@@ -5273,8 +5297,7 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                             continue;  // Skip trees with 0 nodes
                         }
                         
-                        // Allocate GPU memory for RF-GAP upper triangle
-                        size_t upper_triangle_size = (static_cast<size_t>(nsample) * (nsample + 1)) / 2;
+                        size_t upper_triangle_size = (static_cast<size_t>(prox_dim) * (prox_dim + 1)) / 2;
                         __half* tree_rfgap_upper_gpu = nullptr;
                         
                         // Matches backup version - direct allocation, no error checking
@@ -5293,15 +5316,14 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                         // Note: RF-GAP uses nin (bootstrap multiplicities) and nodextr (terminal nodes)
                         // Both are already available from GPU tree growing
                         rf::cuda::gpu_proximity_rfgap_upper_triangle_fp16(
-                            nin + nin_offset,           // Bootstrap multiplicities for this tree
-                            nodextr_all + nodextr_offset,  // Terminal node assignments for this tree
+                            nin + nin_offset,
+                            nodextr_all + nodextr_offset,
                             nsample,
-                            tree_rfgap_upper_gpu        // Output: Packed upper triangle in FP16
+                            tree_rfgap_upper_gpu
                         );
                         
-                        // Add to low-rank matrix using GPU memory directly (no CPU copy!)
                         lowrank_prox_ptr->add_tree_contribution_incremental_upper_triangle_fp16(
-                            tree_rfgap_upper_gpu, nsample  // Pass GPU pointer directly
+                            tree_rfgap_upper_gpu, prox_dim
                         );
                         
                         // Free GPU memory - matches backup version
