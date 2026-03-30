@@ -206,7 +206,7 @@ For complete API documentation with all parameters, methods, and examples, see *
 
 | Use Case | Train Size | Features | Trees | Training Time |
 |----------|------------|----------|-------|---------------|
-| Recommender (Unsup) | 59,047 (×2) | 23 | 1,000 | 1,254s |
+| Recommender (Unsup) | 59,047 (×2) | 23 | 1,000 | ~1,040s |
 | Recommender (Sup) | 47,237 | 21 | 1,000 | 120s |
 | Finance Classification | 46,396 | 15 | 500 | 69s |
 | Bike Regression | 5,725 | 4 | 1,000 | 24s |
