@@ -147,7 +147,7 @@ RFX-Fuse Unsupervised for retrieval + RFX-Fuse Supervised for re-ranking on Movi
 
 ![Recommender System Results Stage 2 Top K Retrieval](examples/recommender_system/unsupervised_supervised_boost.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 **[View Code →](examples/recommender_system/demo_recommender_system.py)**
 
@@ -161,7 +161,7 @@ Single classifier provides regulatory-compliant explanations (ECOA, GDPR, Fair L
 
 ![Finance Explainability Results](examples/classification/loan_classification_9panel_b.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 **[View Code →](examples/classification/demo_loan_classification.py)**
 
@@ -173,7 +173,7 @@ RFX-Fuse Regressor on UCI Bike Sharing dataset with full explainability.
 
 ![Time Series Results](examples/time_series/comprehensive_15panel_analysis.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 **[View Code →](examples/time_series/demo_time_series.py)**
 
@@ -185,7 +185,7 @@ RFX-Fuse Regressor on UCI Bike Sharing dataset with full explainability.
 
 ![Imputation Validation Results](examples/data_imputation/imputation_validation.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 **[View Code →](examples/data_imputation/demo_imputation.py)**
 
@@ -197,7 +197,7 @@ Breiman-Cutler method: train on clean data, anomalies have high P(synthetic).
 
 ![Anomaly Detection Results](examples/anomaly_detection/anomaly_detection.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 **[View Code →](examples/anomaly_detection/demo_anomaly_detection.py)**
 
