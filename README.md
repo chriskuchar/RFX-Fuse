@@ -127,7 +127,7 @@ RFX-Fuse Unsupervised for retrieval + RFX-Fuse Supervised for re-ranking on Movi
 
 ![Recommender System Results Stage 1 Similarity Scoring](examples/recommender_system/unsupervised_and_faiss.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
  <br><br>
 
@@ -135,13 +135,13 @@ RFX-Fuse Unsupervised for retrieval + RFX-Fuse Supervised for re-ranking on Movi
 
 ![Recommender System Results Stage 2 Supervised Modeling](examples/recommender_system/supervised_prediction_similarity.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
  <br><br>
 #### Recommender System Stage 2 Part 2:
 
 ![Recommender System Results Stage 2 Outlier Detection](examples/recommender_system/supervised_outlier_detection.png)
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
  <br><br>
 #### Recommender System Stage 2 Part 3:
 
