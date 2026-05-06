@@ -966,19 +966,18 @@ __global__ void gpu_presort_features_kernel(
 }
 
 // GPU bootstrap sampling kernel
+// sample_weights_cum: cumulative sample weights for weighted bootstrap (nullptr = uniform)
+// total_sample_weight: sum of all sample weights (only used when sample_weights_cum != nullptr)
 __global__ void gpu_bootstrap_kernel(
     integer_t num_trees, integer_t nsample, const real_t* weight,
     integer_t* nin_all, real_t* win_all, integer_t* jinbag_all,
     curandState* random_states, const integer_t* seeds,
-    bool use_casewise) {  // Pass use_casewise as parameter (g_config not accessible in device code)
+    bool use_casewise,
+    const real_t* sample_weights_cum,
+    real_t total_sample_weight) {
     
     integer_t tree_id = blockIdx.x;
     if (tree_id >= num_trees) return;
-    
-    // Debug output
-    // if (tree_id == 0 && threadIdx.x == 0) {
-    //     printf("GPU: Bootstrap kernel started for tree %d\n", tree_id);
-    // }
     
     integer_t tid = threadIdx.x;
     integer_t stride = blockDim.x;
@@ -999,30 +998,32 @@ __global__ void gpu_bootstrap_kernel(
     }
     __syncthreads();
     
-    // Bootstrap sampling - exact port from original Fortran boot.f
-    // Original: i = int(randomu()*nsample) + 1  (1-based: generates 1..nsample)
-    // GPU port: i = static_cast<integer_t>(rand_val * nsample)  (0-based: generates 0..nsample-1)
-    // Note: Expected in-bag percentage = 1 - (1 - 1/n)^n
-    //       For n→∞: approaches 1 - e^(-1) ≈ 0.6321 (63.2%)
-    //       For finite n: slightly higher (e.g., n=150: ~63.21%, n=100: ~63.40%, n=10: ~65.13%)
     curandState local_state = random_states[tree_id];
     
-    // Generate bootstrap samples (match Fortran: int(randomu() * nsample) + 1)
-    // Parallel bootstrap: each thread handles subset of samples using skipahead
-    // This matches GPU Sparse for consistent RNG sequences
     for (integer_t s = tid; s < nsample; s += stride) {
-        // Create thread-specific random state using skipahead (matches GPU Sparse)
         curandState thread_state = local_state;
-        skipahead(s, &thread_state);  // Jump to position s in sequence
+        skipahead(s, &thread_state);
         
         real_t rand_val = curand_uniform(&thread_state);
+        integer_t i;
         
-        // Convert to sample index (0-based)
-        integer_t i = static_cast<integer_t>(rand_val * static_cast<real_t>(nsample));
-        if (i >= nsample) i = nsample - 1;
-        if (i < 0) i = 0;
+        if (sample_weights_cum != nullptr) {
+            // Weighted sampling: binary search into cumulative weights
+            real_t target = rand_val * total_sample_weight;
+            integer_t lo = 0, hi = nsample - 1;
+            while (lo < hi) {
+                integer_t mid = lo + (hi - lo) / 2;
+                if (sample_weights_cum[mid] < target) lo = mid + 1;
+                else hi = mid;
+            }
+            i = lo;
+        } else {
+            // Uniform sampling (original Breiman-Cutler boot.f)
+            i = static_cast<integer_t>(rand_val * static_cast<real_t>(nsample));
+            if (i >= nsample) i = nsample - 1;
+            if (i < 0) i = 0;
+        }
         
-        // Count occurrences using atomic operations
         ::atomicAdd(&nin[i], 1);
     }
     
@@ -3024,7 +3025,8 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                         const uint8_t* X_binned,  // Pre-binned feature data [nsample × mdim] (host memory)
                         const real_t* bin_edges_all,  // Bin edges [mdim × 257] (host memory)
                         const integer_t* n_bins_per_feature,  // Number of bins per feature [mdim] (host memory)
-                        integer_t max_bins) {  // Maximum bins (typically 256)
+                        integer_t max_bins,  // Maximum bins (typically 256)
+                        const real_t* bootstrap_weights) {  // Per-sample bootstrap draw probability (host, nullptr = uniform)
     
     // std::cout << "[GPU_GROWTREE_BATCH] ENTRY - num_trees=" << num_trees << std::endl;
     // std::cout.flush();
@@ -3548,11 +3550,27 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
     // std::cout << "GPU: Launching bootstrap kernel with " << num_trees << " trees..." << std::endl;
     // std::cout << "GPU: Bootstrap grid size: " << bootstrap_grid_size.x << ", Block size: " << bootstrap_block_size.x << std::endl;
     
+    // Compute cumulative sample weights for weighted bootstrap (if provided)
+    real_t* sample_weights_cum_gpu = nullptr;
+    real_t total_sample_weight = 0.0f;
+    if (bootstrap_weights != nullptr) {
+        std::vector<real_t> cum(nsample);
+        cum[0] = bootstrap_weights[0];
+        for (integer_t i = 1; i < nsample; ++i) {
+            cum[i] = cum[i - 1] + bootstrap_weights[i];
+        }
+        total_sample_weight = cum[nsample - 1];
+        CUDA_CHECK_VOID(cudaMalloc(&sample_weights_cum_gpu, nsample * sizeof(real_t)));
+        cudaMemcpyAsync(sample_weights_cum_gpu, cum.data(), nsample * sizeof(real_t),
+                        cudaMemcpyHostToDevice, compute_stream);
+    }
+    
     // OPTIMIZATION: Launch on stream - ordered after init kernel
     gpu_bootstrap_kernel<<<bootstrap_grid_size, bootstrap_block_size, 0, compute_stream>>>(
         num_trees, nsample, win_gpu, nin_all_gpu, win_all_gpu, jinbag_all_gpu,
         random_states, seeds_gpu,
-        g_config.use_casewise  // Pass use_casewise as parameter
+        g_config.use_casewise,
+        sample_weights_cum_gpu, total_sample_weight
     );
     
     // Matches backup version - no kernel launch error checking
@@ -5484,6 +5502,7 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
     if (nin_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(nin_all_gpu));
     if (win_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(win_all_gpu));
     if (random_states != nullptr) CUDA_CHECK_VOID(cudaFree(random_states));
+    if (sample_weights_cum_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(sample_weights_cum_gpu));
     if (nodextr_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(nodextr_all_gpu));
     if (tnodewt_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(tnodewt_all_gpu));
     if (d_nodextr_single != nullptr) CUDA_CHECK_VOID(cudaFree(d_nodextr_single));

@@ -100,7 +100,8 @@ extern void cpu_bootstrap(const real_t* weight, integer_t nsample,
                           real_t* win, integer_t* nin, integer_t* nout,
                           integer_t* jinbag, integer_t* joobag,
                           integer_t& ninbag, integer_t& noobag,
-                          integer_t tree_id);
+                          integer_t tree_id,
+                          const real_t* sample_weights);
 
 // ============================================================================
 // Main Bootstrap Wrapper
@@ -132,12 +133,13 @@ void gpu_bootstrap(const real_t* weight, integer_t nsample,
                real_t* win, integer_t* nin, integer_t* nout,
                integer_t* jinbag, integer_t* joobag,
                integer_t& ninbag, integer_t& noobag,
-               integer_t tree_id) {
+               integer_t tree_id,
+               const real_t* sample_weights) {
 
     // Always use CPU fallback to avoid global state issues
     // This ensures deterministic behavior and avoids memory corruption
     cpu_bootstrap(weight, nsample, win, nin, nout, jinbag,
-                          joobag, ninbag, noobag, tree_id);
+                          joobag, ninbag, noobag, tree_id, sample_weights);
 }
 
 } // namespace rf

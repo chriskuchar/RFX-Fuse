@@ -48,16 +48,23 @@ These capabilities enable it to be a unified learning and similarity engine. Wit
 | Top-K similar with explanations | ✓ | — | — | — |
 | Outlier detection with explanations | ✓ | — | — | — |
 | Missing value imputation | ✓ | — | — | — |
+| Weighted bootstrap sampling | ✓ | ✓ | ✓ | — |
 
 ## Installation
 
-### From PyPI
+### From PyPI (GPU)
 
 ```bash
 pip install rfx-fuse
 ```
 
-*CPU-only version (`pip install rfx-fuse-cpu`) coming soon.*
+### From PyPI (CPU-only, no build tools required)
+
+```bash
+pip install rfx-fuse-cpu
+```
+
+Pre-built binary wheel -- no CMake, compiler, or CUDA needed.
 
 ### From Source (GPU)
 
@@ -72,16 +79,16 @@ pip install -e .
 ```bash
 git clone https://github.com/chriskuchar/RFX-Fuse.git
 cd RFX-Fuse
-pip install -e . --config-settings=cmake.args=-DRFX_CPU_ONLY=ON
+RFX_CPU_ONLY=1 pip install -e .
 ```
 
 ### Prerequisites
 
-- **CMake** 3.12+
-- **Python** 3.8+
-- **C++ compiler** with C++17 support (GCC 7+, Clang 5+)
+- **Python** 3.9+
+- **CMake** 3.12+ (source builds only)
+- **C++ compiler** with C++17 support (GCC 7+, Clang 5+) (source builds only)
 - **OpenMP** (usually included with compiler)
-- **CUDA toolkit** 12.8+ (for GPU acceleration)
+- **CUDA toolkit** 12.8+ (GPU acceleration only)
 
 ### Verify Installation
 
@@ -102,6 +109,7 @@ Each use case has a complete demonstration script in the `examples/` folder:
 | **Time Series Regression** | [`examples/time_series/demo_time_series.py`](examples/time_series/demo_time_series.py) | Bike sharing: prediction + outlier detection |
 | **Imputation Validation** | [`examples/data_imputation/demo_imputation.py`](examples/data_imputation/demo_imputation.py) | Rank imputation methods without ground truth |
 | **Anomaly Detection** | [`examples/anomaly_detection/demo_anomaly_detection.py`](examples/anomaly_detection/demo_anomaly_detection.py) | Breiman-Cutler outlier detection |
+| **Sample Weights** | [`examples/classification/demo_sample_weights.py`](examples/classification/demo_sample_weights.py) | Weighted bootstrap sampling for classification & regression |
 
 Run an example:
 ```bash

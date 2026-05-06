@@ -164,12 +164,13 @@ public:
     ~RandomForest();
 
     // Training methods for different task types
-    void fit_classification(const real_t* X, const integer_t* y, const real_t* sample_weight = nullptr);
-    void fit_regression(const real_t* X, const real_t* y, const real_t* sample_weight = nullptr);
-    void fit_unsupervised(const real_t* X, const real_t* sample_weight = nullptr);
+    // sample_weights: per-sample probability weights for bootstrap draw selection (nullptr = uniform)
+    void fit_classification(const real_t* X, const integer_t* y, const real_t* sample_weights = nullptr);
+    void fit_regression(const real_t* X, const real_t* y, const real_t* sample_weights = nullptr);
+    void fit_unsupervised(const real_t* X, const real_t* sample_weights = nullptr);
     
     // Unified fit method that dispatches based on task type
-    void fit(const real_t* X, const void* y, const real_t* sample_weight = nullptr);
+    void fit(const real_t* X, const void* y, const real_t* sample_weights = nullptr);
     
     // ========================================================================
     // SPARSE MATRIX SUPPORT (CSR format)
@@ -179,12 +180,12 @@ public:
     // ========================================================================
     
     // Sparse training methods
-    void fit_classification_sparse(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weight = nullptr);
-    void fit_regression_sparse(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weight = nullptr);
-    void fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_t* sample_weight = nullptr);
+    void fit_classification_sparse(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weights = nullptr);
+    void fit_regression_sparse(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weights = nullptr);
+    void fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_t* sample_weights = nullptr);
     
     // Unified sparse fit method
-    void fit_sparse(const SparseMatrixCSR& X, const void* y, const real_t* sample_weight = nullptr);
+    void fit_sparse(const SparseMatrixCSR& X, const void* y, const real_t* sample_weights = nullptr);
     
     // Sparse prediction methods
     void predict_sparse(const SparseMatrixCSR& X, void* predictions);
@@ -370,7 +371,7 @@ public:
     void predict_leaf_assignments_sparse(const SparseMatrixCSR& X_new, int16_t* leaf_out) const;
 
     // Batch tree growing (GPU-optimized)
-    void fit_batch_gpu(const real_t* X, const void* y, const real_t* sample_weight,
+    void fit_batch_gpu(const real_t* X, const void* y, const real_t* casewise_weights,
                       integer_t batch_size = 10);
 
     // Progress callback mechanism
@@ -414,7 +415,8 @@ private:
     integer_t n_synthetic_;                          // Number of synthetic samples
     integer_t n_total_unsupervised_;                 // Total samples (n_real + n_synthetic)
     
-    std::vector<real_t> sample_weight_;
+    std::vector<real_t> casewise_weights_;    // Internal: always 1.0, used in win = nin * cw when use_casewise=True
+    std::vector<real_t> bootstrap_weights_;   // User-provided sample_weights for weighted bootstrap draw probability
 
     // Model outputs
     real_t oob_error_;      // Classification error rate
@@ -574,9 +576,9 @@ private:
                                 integer_t* catgoleft);
     
     // GPU sparse training
-    void fit_sparse_gpu_classification(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weight);
-    void fit_sparse_gpu_regression(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weight);
-    void fit_sparse_gpu_unsupervised(const SparseMatrixCSR& X, const real_t* sample_weight);
+    void fit_sparse_gpu_classification(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weights);
+    void fit_sparse_gpu_regression(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weights);
+    void fit_sparse_gpu_unsupervised(const SparseMatrixCSR& X, const real_t* sample_weights);
 };
 
 } // namespace rf

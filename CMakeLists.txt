@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18)
 
 # CPU-only build option
 option(RFX_CPU_ONLY "Build without CUDA support" OFF)
+# Static CUDA runtime linking (for pre-built wheel distribution)
+option(RFX_CUDA_STATIC "Statically link CUDA runtime into the wheel" OFF)
 
 # Must declare project with at least CXX before find_package calls
 project(RFXFuse LANGUAGES CXX)
@@ -17,7 +19,12 @@ else()
         enable_language(CUDA)
         set(CUDA_AVAILABLE ON)
         add_definitions(-DCUDA_FOUND)
-        message(STATUS "Building with CUDA support")
+        if(RFX_CUDA_STATIC)
+            set(CMAKE_CUDA_RUNTIME_LIBRARY Static)
+            message(STATUS "Building with CUDA support (static runtime)")
+        else()
+            message(STATUS "Building with CUDA support")
+        endif()
     else()
         set(CUDA_AVAILABLE OFF)
         message(WARNING "CUDA not found - building CPU-only version")
@@ -55,8 +62,22 @@ find_library(NUMA_LIB NAMES numa libnuma.so.2 libnuma.so)
 # Try to find LAPACK (optional - we have fallback below)
 find_package(LAPACK)
 
-# Compiler flags - add debug symbols even in release mode
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O3 -march=native")
+# Portable wheel builds must not use -march=native (causes SIGILL on other CPUs)
+option(RFX_PORTABLE "Build portable binaries for wheel distribution" OFF)
+
+# Compiler flags
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /DNDEBUG")
+else()
+    if(RFX_PORTABLE OR RFX_CPU_ONLY)
+        # -mavx2: required because rf_vectorized_ops.cpp uses AVX intrinsics
+        # (runtime dispatch falls back to scalar on non-AVX CPUs)
+        # AVX2 has been on all x86-64 CPUs since Haswell (2013)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mavx2 -mfma -DNDEBUG")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O3 -march=native")
+    endif()
+endif()
 
 if(CUDA_AVAILABLE)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -g -O3 --use_fast_math -diag-suppress=177,20014,550")
@@ -175,12 +196,12 @@ endif()
 # Use find_library to locate LAPACK and BLAS
 # Try multiple library name variations and paths
 find_library(LAPACK_LIB 
-    NAMES lapack liblapack.so.3 liblapack.so
+    NAMES lapack liblapack.so.3 liblapack.so libopenblas openblas
     PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
     NO_DEFAULT_PATH
 )
 find_library(BLAS_LIB 
-    NAMES blas libblas.so.3 libblas.so
+    NAMES blas libblas.so.3 libblas.so libopenblas openblas
     PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
     NO_DEFAULT_PATH
 )

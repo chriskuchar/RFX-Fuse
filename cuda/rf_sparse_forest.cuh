@@ -125,7 +125,9 @@ integer_t train_sparse_forest_gpu(
     // OOB tracking for Breiman's proximity (optional, nullptr to skip)
     integer_t* h_nin_all = nullptr,  // [ntree * nsample] - bootstrap membership per tree (0 = OOB)
     // Progress callback (optional, nullptr to skip)
-    std::function<void(integer_t, integer_t)> progress_callback = nullptr  // (current_tree, total_trees)
+    std::function<void(integer_t, integer_t)> progress_callback = nullptr,  // (current_tree, total_trees)
+    // Bootstrap weights (optional, nullptr = uniform bootstrap)
+    const real_t* bootstrap_weights = nullptr
 );
 
 /**

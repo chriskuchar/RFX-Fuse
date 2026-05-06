@@ -645,3 +645,216 @@ def rfx_impute_topk_median(
 # Aliases for backward compatibility
 rfx_impute_knn_mean = rfx_impute_topk_mean
 rfx_impute_knn_median = rfx_impute_topk_median
+
+
+# =============================================================================
+# Class-based imputer with fit/transform API
+# =============================================================================
+
+class Imputer:
+    """Random Forest imputer with fit/transform API.
+
+    Usage:
+        imputer = Imputer(n_trees=50, use_gpu=True)
+        X_train_imp = imputer.fit_transform(X_train)   # fit + impute training data
+        X_test_imp = imputer.transform(X_test)          # impute new data using stored models
+    """
+
+    def __init__(self, method='rough', n_trees=50, n_iterations=1,
+                 use_gpu=True, auto_gpu=True, categorical_features=None,
+                 max_categorical_unique=10, verbose=True, seed=42):
+        self.method = method
+        self.n_trees = n_trees
+        self.n_iterations = n_iterations
+        self.use_gpu = use_gpu
+        self.auto_gpu = auto_gpu
+        self.categorical_features = categorical_features
+        self.max_categorical_unique = max_categorical_unique
+        self.verbose = verbose
+        self.seed = seed
+
+        # Populated during fit()
+        self.models_ = {}           # feature index → trained RF model
+        self.classes_ = {}          # feature index → unique class array (categorical only)
+        self.initial_fill_ = None   # per-feature fill values (median/mode)
+        self.is_categorical_ = None
+        self.feature_order_ = None  # order to apply models
+        self.n_features_ = None
+        self.is_fitted_ = False
+
+    def fit(self, X: np.ndarray):
+        """Fit imputer: learn initial fill values and train per-feature RF models."""
+        X = np.asarray(X, dtype=np.float32)
+        n_samples, n_features = X.shape
+        self.n_features_ = n_features
+
+        # Detect categorical
+        if self.categorical_features is not None:
+            self.is_categorical_ = np.asarray(self.categorical_features, dtype=bool)
+        else:
+            self.is_categorical_ = _detect_categorical(X, self.max_categorical_unique)
+
+        # Compute and store initial fill values
+        self.initial_fill_ = np.zeros(n_features, dtype=np.float32)
+        for j in range(n_features):
+            valid = X[~np.isnan(X[:, j]), j]
+            if len(valid) == 0:
+                self.initial_fill_[j] = 0.0
+            elif self.is_categorical_[j]:
+                values, counts = np.unique(valid, return_counts=True)
+                self.initial_fill_[j] = values[np.argmax(counts)]
+            else:
+                self.initial_fill_[j] = np.median(valid)
+
+        # Find features with missing
+        missing_mask = np.isnan(X)
+        n_missing_per_feature = missing_mask.sum(axis=0)
+        features_with_missing = np.where(n_missing_per_feature > 0)[0]
+        self.feature_order_ = features_with_missing[np.argsort(n_missing_per_feature[features_with_missing])]
+
+        # Initial imputation
+        X_imputed = X.copy()
+        for j in range(n_features):
+            mask = np.isnan(X_imputed[:, j])
+            if mask.any():
+                X_imputed[mask, j] = self.initial_fill_[j]
+
+        # GPU auto-select
+        use_gpu_actual = self.use_gpu
+        if self.auto_gpu:
+            data_size = n_samples * n_features
+            gpu_threshold = 500_000
+            use_gpu_actual = self.use_gpu and (data_size > gpu_threshold)
+            if self.verbose and self.use_gpu and not use_gpu_actual:
+                print(f"  Auto GPU: Using CPU (data size {data_size:,} < {gpu_threshold:,} threshold)")
+
+        if self.verbose:
+            n_cat = self.is_categorical_.sum()
+            print(f"Imputer fit")
+            print(f"  Samples: {n_samples:,}, Features: {n_features}")
+            print(f"  Features with missing: {len(self.feature_order_)}")
+            print(f"  Categorical: {n_cat}, Numeric: {n_features - n_cat}")
+
+        # Train per-feature RF models
+        self.models_ = {}
+        self.classes_ = {}
+
+        for iteration in range(self.n_iterations):
+            if self.verbose:
+                print(f"\n  Iteration {iteration + 1}/{self.n_iterations}")
+
+            for j in self.feature_order_:
+                feat_missing = missing_mask[:, j]
+                n_missing_j = feat_missing.sum()
+                if n_missing_j == 0:
+                    continue
+
+                train_mask = ~feat_missing
+                other_features = [f for f in range(n_features) if f != j]
+                X_train = X_imputed[train_mask][:, other_features]
+                y_train = X_imputed[train_mask, j]
+                X_test = X_imputed[feat_missing][:, other_features]
+
+                if len(y_train) < 10:
+                    continue
+
+                mtry = max(1, int(np.sqrt(len(other_features))))
+
+                try:
+                    if self.is_categorical_[j]:
+                        classes = np.unique(y_train)
+                        self.classes_[j] = classes
+
+                        if len(classes) < 2:
+                            y_pred = np.full(n_missing_j, classes[0])
+                        else:
+                            y_train_int = np.searchsorted(classes, y_train).astype(np.int32)
+                            model = RandomForestClassifier(
+                                ntree=self.n_trees, mtry=mtry, nodesize=5,
+                                use_gpu=use_gpu_actual, compute_importance=False,
+                                compute_proximity=False, show_progress=False,
+                            )
+                            model.fit(X_train, y_train_int)
+                            self.models_[j] = model
+                            y_pred_int = model.predict(X_test)
+                            y_pred = classes[y_pred_int.astype(int)]
+                    else:
+                        model = RandomForestRegressor(
+                            ntree=self.n_trees, mtry=mtry, nodesize=5,
+                            use_gpu=use_gpu_actual, compute_importance=False,
+                            compute_proximity=False, show_progress=False,
+                        )
+                        model.fit(X_train, y_train)
+                        self.models_[j] = model
+                        y_pred = model.predict(X_test)
+
+                    X_imputed[feat_missing, j] = y_pred
+
+                    if self.verbose:
+                        ftype = "cat" if self.is_categorical_[j] else "num"
+                        print(f"    Feature {j} ({ftype}): trained on {len(y_train)} samples")
+
+                except Exception as e:
+                    if self.verbose:
+                        print(f"    Feature {j}: Error - {e}")
+
+        self.is_fitted_ = True
+        if self.verbose:
+            print(f"\n  ✓ Fit complete! {len(self.models_)} models stored.")
+        return self
+
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        """Impute missing values in new data using stored models."""
+        if not self.is_fitted_:
+            raise RuntimeError("Call fit() before transform()")
+
+        X = np.asarray(X, dtype=np.float32)
+        if X.shape[1] != self.n_features_:
+            raise ValueError(f"Expected {self.n_features_} features, got {X.shape[1]}")
+
+        X_imputed = X.copy()
+
+        # Initial fill with stored values
+        for j in range(self.n_features_):
+            mask = np.isnan(X_imputed[:, j])
+            if mask.any():
+                X_imputed[mask, j] = self.initial_fill_[j]
+
+        # Apply stored models in same feature order
+        missing_mask = np.isnan(X)
+        for j in self.feature_order_:
+            feat_missing = missing_mask[:, j]
+            n_missing_j = feat_missing.sum()
+            if n_missing_j == 0:
+                continue
+
+            other_features = [f for f in range(self.n_features_) if f != j]
+            X_test = X_imputed[feat_missing][:, other_features]
+
+            if j in self.models_:
+                try:
+                    if self.is_categorical_[j]:
+                        classes = self.classes_[j]
+                        y_pred_int = self.models_[j].predict(X_test)
+                        y_pred = classes[y_pred_int.astype(int)]
+                    else:
+                        y_pred = self.models_[j].predict(X_test)
+
+                    X_imputed[feat_missing, j] = y_pred
+                except Exception as e:
+                    if self.verbose:
+                        print(f"    Feature {j}: transform error - {e}")
+            elif j in self.classes_ and len(self.classes_[j]) < 2:
+                # Single-class feature — fill with that value
+                X_imputed[feat_missing, j] = self.classes_[j][0]
+
+        if self.verbose:
+            remaining_nan = np.isnan(X_imputed).sum()
+            print(f"  ✓ Transform complete! NaN remaining: {remaining_nan}")
+
+        return X_imputed
+
+    def fit_transform(self, X: np.ndarray) -> np.ndarray:
+        """Fit and transform in one step."""
+        self.fit(X)
+        return self.transform(X)

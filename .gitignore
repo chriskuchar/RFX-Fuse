@@ -22,10 +22,17 @@ __pycache__/
 *$py.class
 *.so
 *.so.*
+*.pyd
 *.egg-info/
 dist/
+dist_cpu/
+dist_gpu/
+dist_win/
+dist_all/
 build/
 *.egg
+*.whl
+wheelhouse*/
 
 # IDE
 .vscode/
@@ -45,3 +52,35 @@ test_output.txt
 
 # Tests (keep private for now)
 tests/
+
+# Docs - generated HTML and local-only docs
+docs/*.html
+docs/CUDA_BASICS_REFERENCE.md
+docs/CUDA_BEST_PRACTICES.md
+docs/CUDA_IMPLEMENTATION.md
+docs/MD_TO_HTML_GUIDE.md
+docs/RFX_FUSE_ARCHITECTURE.md
+docs/convert_md_to_html.py
+docs/job_application_response.md
+docs/PLAN_PARALLEL_PRESORT_FALLBACK.md
+docs/SAMPLE_WEIGHTS_BOOTSTRAP_STATUS.md
+docs/SAMPLE_WEIGHTS_UNSUPERVISED_TODO.md
+docs/WHEEL_BUILD_FIXES.md
+
+# Large data files in examples
+examples/**/*.csv
+examples/**/*.tar.gz
+examples/**/*.zip
+examples/**/*.xlsx
+examples/**/build/
+examples/**/zillow-prize-1/
+
+# Generated output images from demos
+examples/classification/sample_weights_comparison.png
+examples/recommender_system/rfx_outlier_vs_isolation_forest.png
+examples/recommender_system/topk_similarity_drivers.png
+
+# Temp/build artifacts
+*.tar.gz
+*_timing.txt
+submission.tar.gz

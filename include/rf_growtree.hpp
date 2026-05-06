@@ -69,7 +69,8 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
                         const uint8_t* X_binned = nullptr,  // Pre-binned feature data [nsample × mdim]
                         const real_t* bin_edges_all = nullptr,  // Bin edges [mdim × 257]
                         const integer_t* n_bins_per_feature = nullptr,  // Number of bins per feature [mdim]
-                        integer_t max_bins = 256);  // Maximum bins
+                        integer_t max_bins = 256,  // Maximum bins
+                        const real_t* bootstrap_weights = nullptr);  // Per-sample bootstrap draw probability
 #endif
 
 // Unified interface - automatically selects GPU or CPU

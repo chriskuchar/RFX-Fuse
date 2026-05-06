@@ -85,7 +85,7 @@ py::object ensure_csr(py::object sparse_matrix) {
 void fit_wrapper(rf::RandomForest& self,
                  py::array_t<rf::real_t> X,
                  py::array y,
-                 py::array_t<rf::real_t> sample_weight) {
+                 py::array_t<rf::real_t> sample_weights) {
     // Wrap entire function in try-catch to ensure clean return
     // This prevents any exceptions from causing stack corruption during return
     try {
@@ -197,13 +197,13 @@ void fit_wrapper(rf::RandomForest& self,
     }
     
     // Validate sample weights if provided
-    if (sample_weight.size() > 0) {
-        auto w_buf = sample_weight.request();
+    if (sample_weights.size() > 0) {
+        auto w_buf = sample_weights.request();
         const float* w_data = static_cast<const float*>(w_buf.ptr);
         
         for (py::ssize_t i = 0; i < w_buf.size; ++i) {
             if (w_data[i] < 0) {
-                throw std::runtime_error("sample_weight contains negative values at index " + 
+                throw std::runtime_error("sample_weights contains negative values at index " + 
                                        std::to_string(i) + " - weights must be non-negative");
             }
         }
@@ -217,13 +217,13 @@ void fit_wrapper(rf::RandomForest& self,
     const rf::real_t* y_ptr = static_cast<const rf::real_t*>(y_buf.ptr);
     const rf::real_t* weight_ptr = nullptr;
 
-    if (sample_weight.size() > 0) {
-        auto w_buf = sample_weight.request();
+    if (sample_weights.size() > 0) {
+        auto w_buf = sample_weights.request();
         if (w_buf.shape[0] != X_buf.shape[0]) {
-            throw std::runtime_error("sample_weight must have same length as X");
+            throw std::runtime_error("sample_weights must have same length as X");
         }
         if (!w_buf.ptr) {
-            throw std::runtime_error("Invalid sample_weight pointer");
+            throw std::runtime_error("Invalid sample_weights pointer");
         }
         weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
     }
@@ -314,7 +314,7 @@ void fit_wrapper(rf::RandomForest& self,
 void fit_sparse_wrapper(rf::RandomForest& self,
                         py::object X_sparse,
                         py::array y,
-                        py::array_t<rf::real_t> sample_weight) {
+                        py::array_t<rf::real_t> sample_weights) {
     try {
         // Convert to CSR if not already
         py::object X_csr = ensure_csr(X_sparse);
@@ -332,8 +332,8 @@ void fit_sparse_wrapper(rf::RandomForest& self,
         // For unsupervised learning, y might be empty or synthetic
         if (self.get_task_type() == rf::TaskType::UNSUPERVISED) {
             const rf::real_t* weight_ptr = nullptr;
-            if (sample_weight.size() > 0) {
-                auto w_buf = sample_weight.request();
+            if (sample_weights.size() > 0) {
+                auto w_buf = sample_weights.request();
                 weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
             }
             self.fit_unsupervised_sparse(sparse_matrix, weight_ptr);
@@ -342,8 +342,8 @@ void fit_sparse_wrapper(rf::RandomForest& self,
         
         // Get sample weights
         const rf::real_t* weight_ptr = nullptr;
-        if (sample_weight.size() > 0) {
-            auto w_buf = sample_weight.request();
+        if (sample_weights.size() > 0) {
+            auto w_buf = sample_weights.request();
             weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
         }
         
@@ -928,7 +928,7 @@ PYBIND11_MODULE(RFXFuse, m) {
         RandomForestWrapper(const rf::RandomForestConfig& config) 
             : config_(config), initialized_(false) {}
         
-        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // Initialize RandomForest lazily when fit is called
             if (!initialized_) {
                 try {
@@ -1021,13 +1021,13 @@ PYBIND11_MODULE(RFXFuse, m) {
             if (y_buf.format == py::format_descriptor<rf::real_t>::format()) {
                 rf_->fit(static_cast<rf::real_t*>(X_buf.ptr), 
                         static_cast<rf::real_t*>(y_buf.ptr), 
-                        sample_weight.size() > 0 ? static_cast<rf::real_t*>(sample_weight.request().ptr) : nullptr);
+                        sample_weights.size() > 0 ? static_cast<rf::real_t*>(sample_weights.request().ptr) : nullptr);
             } else {
                 // Convert y to integer format for classification
                 py::array_t<rf::integer_t> y_int = py::cast<py::array_t<rf::integer_t>>(y);
                 rf_->fit(static_cast<rf::real_t*>(X_buf.ptr), 
                         static_cast<rf::integer_t*>(y_int.request().ptr), 
-                        sample_weight.size() > 0 ? static_cast<rf::real_t*>(sample_weight.request().ptr) : nullptr);
+                        sample_weights.size() > 0 ? static_cast<rf::real_t*>(sample_weights.request().ptr) : nullptr);
             }
         }
         
@@ -1133,11 +1133,11 @@ PYBIND11_MODULE(RFXFuse, m) {
     // Register RandomForest class with shared_ptr
     py::class_<rf::RandomForest, std::shared_ptr<rf::RandomForest>>(m, "RandomForest")
         .def("fit", &fit_wrapper,
-             py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+             py::arg("X"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
              "Fit the random forest model")
         
         .def("fit_sparse", &fit_sparse_wrapper,
-             py::arg("X_sparse"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+             py::arg("X_sparse"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
              "Fit the random forest model using sparse matrix input (scipy.sparse.csr_matrix)")
 
         .def("predict", [](rf::RandomForest& self,
@@ -1334,12 +1334,12 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // Ensure C-contiguous array
             py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
             auto X_buf = X_contig.request();
             auto y_buf = y.request();
-            auto sample_weight_buf = sample_weight.request();
+            auto sample_weights_buf = sample_weights.request();
             
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional (samples, features)");
@@ -1623,7 +1623,7 @@ PYBIND11_MODULE(RFXFuse, m) {
             // Call the fit method with actual data
             rf_->fit(static_cast<rf::real_t*>(X_buf.ptr), 
                      y_buf.ptr, 
-                     sample_weight_buf.size > 0 ? static_cast<rf::real_t*>(sample_weight_buf.ptr) : nullptr);
+                     sample_weights_buf.size > 0 ? static_cast<rf::real_t*>(sample_weights_buf.ptr) : nullptr);
             
             // Print GPU memory status after training completes (if GPU was used)
             // Query GPU memory directly using CUDA API (safe after training completes)
@@ -1678,7 +1678,7 @@ PYBIND11_MODULE(RFXFuse, m) {
         // ====================================================================
         // SPARSE FIT - accepts scipy.sparse.csr_matrix
         // ====================================================================
-        void fit_sparse(py::object X_sparse, py::array y, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit_sparse(py::object X_sparse, py::array y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // Convert to CSR if not already
             py::object X_csr = ensure_csr(X_sparse);
             
@@ -1746,8 +1746,8 @@ PYBIND11_MODULE(RFXFuse, m) {
             
             // Get sample weights
             const rf::real_t* weight_ptr = nullptr;
-            if (sample_weight.size() > 0) {
-                auto w_buf = sample_weight.request();
+            if (sample_weights.size() > 0) {
+                auto w_buf = sample_weights.request();
                 weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
             }
             
@@ -2502,17 +2502,17 @@ PYBIND11_MODULE(RFXFuse, m) {
              py::arg("use_histogram") = true,  // Use histogram-based split finding (faster for large datasets >= 1000 samples)
              py::arg("n_bins") = 256)  // Number of bins for histogram (max 256)
         // Auto-detecting fit: accepts both dense numpy arrays and scipy sparse matrices
-        .def("fit", [](RandomForestClassifier& self, py::object X, py::array y, py::array_t<rf::real_t> sample_weight) {
+        .def("fit", [](RandomForestClassifier& self, py::object X, py::array y, py::array_t<rf::real_t> sample_weights) {
             if (is_scipy_sparse(X)) {
                 // Auto-detected sparse input - enable sparse mode and call fit_sparse
                 self.set_use_sparse(true);
-                return self.fit_sparse(X, y, sample_weight);
+                return self.fit_sparse(X, y, sample_weights);
             } else {
                 // Dense input - call regular fit
                 py::array_t<rf::real_t> X_dense = X.cast<py::array_t<rf::real_t>>();
-                return self.fit(X_dense, y, sample_weight);
+                return self.fit(X_dense, y, sample_weights);
             }
-        }, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+        }, py::arg("X"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit the random forest model. Auto-detects scipy.sparse matrices and uses sparse kernels automatically.")
         .def("fit_sparse", [](RandomForestClassifier& self, py::object X_sparse, py::array y) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
@@ -2520,10 +2520,10 @@ PYBIND11_MODULE(RFXFuse, m) {
         }, py::arg("X"), py::arg("y"),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix). "
            "For recommender systems with sparse user-item matrices.")
-        .def("fit_sparse", [](RandomForestClassifier& self, py::object X_sparse, py::array y, py::array_t<rf::real_t> sample_weight) {
+        .def("fit_sparse", [](RandomForestClassifier& self, py::object X_sparse, py::array y, py::array_t<rf::real_t> sample_weights) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
-            return self.fit_sparse(X_sparse, y, sample_weight);
-        }, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+            return self.fit_sparse(X_sparse, y, sample_weights);
+        }, py::arg("X"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix) with sample weights.")
         .def("predict", &RandomForestClassifier::predict)
         .def("predict_proba", &RandomForestClassifier::predict_proba)
@@ -2843,7 +2843,7 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // CRITICAL: Ensure X is C-contiguous (row-major) before accessing data
             // NumPy arrays may be Fortran-contiguous (column-major) which would cause data corruption
             py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contiguous = X;
@@ -2851,7 +2851,7 @@ PYBIND11_MODULE(RFXFuse, m) {
             // Extract data dimensions from actual data
             auto X_buf = X_contiguous.request();
             auto y_buf = y.request();
-            auto sample_weight_buf = sample_weight.request();
+            auto sample_weights_buf = sample_weights.request();
             
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional (samples, features)");
@@ -3066,7 +3066,7 @@ PYBIND11_MODULE(RFXFuse, m) {
             // Call the fit method with actual data
             rf_->fit(static_cast<rf::real_t*>(X_buf.ptr), 
                      y_buf.ptr, 
-                     sample_weight_buf.size > 0 ? static_cast<rf::real_t*>(sample_weight_buf.ptr) : nullptr);
+                     sample_weights_buf.size > 0 ? static_cast<rf::real_t*>(sample_weights_buf.ptr) : nullptr);
             
             // Print GPU memory status after training completes (if GPU was used)
             // Query GPU memory directly using CUDA API (safe after training completes)
@@ -3121,7 +3121,7 @@ PYBIND11_MODULE(RFXFuse, m) {
         // ====================================================================
         // SPARSE FIT - accepts scipy.sparse.csr_matrix for regression
         // ====================================================================
-        void fit_sparse(py::object X_sparse, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit_sparse(py::object X_sparse, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // Convert to CSR if not already
             py::object X_csr = ensure_csr(X_sparse);
             
@@ -3165,8 +3165,8 @@ PYBIND11_MODULE(RFXFuse, m) {
             
             // Get sample weights
             const rf::real_t* weight_ptr = nullptr;
-            if (sample_weight.size() > 0) {
-                auto w_buf = sample_weight.request();
+            if (sample_weights.size() > 0) {
+                auto w_buf = sample_weights.request();
                 weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
             }
             
@@ -3579,7 +3579,102 @@ PYBIND11_MODULE(RFXFuse, m) {
             return rf_->has_inverted_leaf_index();
         }
 
-        
+        // ====================================================================
+        // PREDICT METHODS FOR NEW DATA (inference-time)
+        // ====================================================================
+
+        // Predict leaf assignments for new samples (dense input)
+        py::array_t<int16_t> predict_leaf_assignments(py::array_t<rf::real_t> X_new) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_leaf_assignments()");
+
+            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) {
+                throw std::runtime_error("X must be 2-dimensional");
+            }
+
+            rf::integer_t nsamples_new = X_buf.shape[0];
+            rf::integer_t ntree = rf_->get_n_trees();
+
+            py::array_t<int16_t> result(std::vector<py::ssize_t>{static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(ntree)});
+            auto result_buf = result.request();
+
+            rf_->predict_leaf_assignments(
+                static_cast<rf::real_t*>(X_buf.ptr),
+                nsamples_new,
+                static_cast<int16_t*>(result_buf.ptr)
+            );
+
+            return result;
+        }
+
+        // Predict top-K similar training samples for new data
+        py::tuple predict_top_k_similar(py::array_t<rf::real_t> X_new, int k = 10) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar()");
+
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            const int16_t* train_leaf_ptr = rf_->get_leaf_assignments();
+            if (!train_leaf_ptr) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
+            }
+
+            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) {
+                throw std::runtime_error("X must be 2-dimensional");
+            }
+
+            rf::integer_t nsamples_new = X_buf.shape[0];
+            rf::integer_t ntree = rf_->get_n_trees();
+            rf::integer_t nsample_train = rf_->get_n_samples();
+
+            std::vector<int16_t> new_leaves(nsamples_new * ntree);
+            rf_->predict_leaf_assignments(
+                static_cast<rf::real_t*>(X_buf.ptr),
+                nsamples_new,
+                new_leaves.data()
+            );
+
+            py::array_t<rf::integer_t> top_k_indices(std::vector<py::ssize_t>{static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> top_k_scores(std::vector<py::ssize_t>{static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(k)});
+            auto idx_buf = top_k_indices.request();
+            auto score_buf = top_k_scores.request();
+
+            for (rf::integer_t q = 0; q < nsamples_new; ++q) {
+                std::vector<rf::real_t> similarities(nsample_train, 0.0f);
+
+                for (rf::integer_t t = 0; t < ntree; ++t) {
+                    int16_t query_leaf = new_leaves[q * ntree + t];
+                    for (rf::integer_t i = 0; i < nsample_train; ++i) {
+                        if (train_leaf_ptr[t * nsample_train + i] == query_leaf) {
+                            similarities[i] += 1.0f;
+                        }
+                    }
+                }
+
+                for (rf::integer_t i = 0; i < nsample_train; ++i) {
+                    similarities[i] /= static_cast<rf::real_t>(ntree);
+                }
+
+                std::vector<rf::integer_t> indices(nsample_train);
+                std::iota(indices.begin(), indices.end(), 0);
+                std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                    [&similarities](rf::integer_t a, rf::integer_t b) {
+                        return similarities[a] > similarities[b];
+                    });
+
+                for (int i = 0; i < k; ++i) {
+                    static_cast<rf::integer_t*>(idx_buf.ptr)[q * k + i] = indices[i];
+                    static_cast<rf::real_t*>(score_buf.ptr)[q * k + i] = similarities[indices[i]];
+                }
+            }
+
+            return py::make_tuple(top_k_indices, top_k_scores);
+        }
+
         py::array_t<rf::integer_t> get_oob_counts() {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling get_oob_counts()");
             rf::integer_t nsamples = rf_->get_n_samples();
@@ -3737,17 +3832,17 @@ PYBIND11_MODULE(RFXFuse, m) {
              py::arg("use_histogram") = true,  // Use histogram-based split finding (faster for large datasets >= 1000 samples)
              py::arg("n_bins") = 256)  // Number of bins for histogram (max 256)
         // Auto-detecting fit: accepts both dense numpy arrays and scipy sparse matrices
-        .def("fit", [](RandomForestRegressor& self, py::object X, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weight) {
+        .def("fit", [](RandomForestRegressor& self, py::object X, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weights) {
             if (is_scipy_sparse(X)) {
                 // Auto-detected sparse input - enable sparse mode and call fit_sparse
                 self.set_use_sparse(true);
-                return self.fit_sparse(X, y, sample_weight);
+                return self.fit_sparse(X, y, sample_weights);
             } else {
                 // Dense input - call regular fit
                 py::array_t<rf::real_t> X_dense = X.cast<py::array_t<rf::real_t>>();
-                return self.fit(X_dense, y, sample_weight);
+                return self.fit(X_dense, y, sample_weights);
             }
-        }, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+        }, py::arg("X"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit the random forest model. Auto-detects scipy.sparse matrices and uses sparse kernels automatically.")
         .def("fit_sparse", [](RandomForestRegressor& self, py::object X_sparse, py::array_t<rf::real_t> y) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
@@ -3755,10 +3850,10 @@ PYBIND11_MODULE(RFXFuse, m) {
         }, py::arg("X"), py::arg("y"),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix). "
            "For recommender systems with sparse user-item rating matrices.")
-        .def("fit_sparse", [](RandomForestRegressor& self, py::object X_sparse, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weight) {
+        .def("fit_sparse", [](RandomForestRegressor& self, py::object X_sparse, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weights) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
-            return self.fit_sparse(X_sparse, y, sample_weight);
-        }, py::arg("X"), py::arg("y"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+            return self.fit_sparse(X_sparse, y, sample_weights);
+        }, py::arg("X"), py::arg("y"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix) with sample weights.")
         .def("predict", &RandomForestRegressor::predict)
         .def("get_oob_error", &RandomForestRegressor::get_oob_error)
@@ -3821,6 +3916,28 @@ PYBIND11_MODULE(RFXFuse, m) {
              "Requires compute_leaf_assignments=True when creating the model.")
         .def("has_inverted_leaf_index", &RandomForestRegressor::has_inverted_leaf_index,
              "Check if inverted leaf index has been built.")
+        // ====================================================================
+        // PREDICT METHODS FOR NEW DATA (inference-time)
+        // ====================================================================
+        .def("predict_leaf_assignments", &RandomForestRegressor::predict_leaf_assignments,
+             py::arg("X"),
+             "Predict leaf (terminal node) assignments for NEW samples.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n\n"
+             "Returns:\n"
+             "    2D numpy array of shape (n_samples_new, n_trees) with terminal node IDs.\n"
+             "    Each entry [i, t] is the terminal node ID for new sample i in tree t.\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
+        .def("predict_top_k_similar", &RandomForestRegressor::predict_top_k_similar,
+             py::arg("X"), py::arg("k") = 10,
+             "Find top-K most similar TRAINING samples for NEW samples.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    k: Number of similar training samples to return (default 10)\n\n"
+             "Returns:\n"
+             "    Tuple of (indices, similarity_scores) both of shape (n_samples_new, k).\n"
+             "    indices[i, j] is the j-th most similar training sample index for new sample i.\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
         .def("get_proximity_matrix", &RandomForestRegressor::get_proximity_matrix)
         .def("compute_proximity_matrix", &RandomForestRegressor::get_proximity_matrix, "Alias for get_proximity_matrix()")
         .def("get_lowrank_factors", &RandomForestRegressor::get_lowrank_factors)
@@ -4064,14 +4181,14 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // CRITICAL: Ensure X is C-contiguous (row-major) before accessing data
             // NumPy arrays may be Fortran-contiguous (column-major) which would cause data corruption
             py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contiguous = X;
             
             // Extract data dimensions from actual data
             auto X_buf = X_contiguous.request();
-            auto sample_weight_buf = sample_weight.request();
+            auto sample_weights_buf = sample_weights.request();
             
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional (samples, features)");
@@ -4284,13 +4401,13 @@ PYBIND11_MODULE(RFXFuse, m) {
             
             // Call fit_unsupervised directly (no y parameter needed)
             rf_->fit_unsupervised(static_cast<rf::real_t*>(X_buf.ptr), 
-                                 sample_weight_buf.size > 0 ? static_cast<rf::real_t*>(sample_weight_buf.ptr) : nullptr);
+                                 sample_weights_buf.size > 0 ? static_cast<rf::real_t*>(sample_weights_buf.ptr) : nullptr);
         }
         
         // ====================================================================
         // SPARSE FIT - accepts scipy.sparse.csr_matrix for unsupervised learning
         // ====================================================================
-        void fit_sparse(py::object X_sparse, py::array_t<rf::real_t> sample_weight = py::array_t<rf::real_t>()) {
+        void fit_sparse(py::object X_sparse, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
             // Convert to CSR if not already
             py::object X_csr = ensure_csr(X_sparse);
             
@@ -4405,8 +4522,8 @@ PYBIND11_MODULE(RFXFuse, m) {
             
             // Get sample weights
             const rf::real_t* weight_ptr = nullptr;
-            if (sample_weight.size() > 0) {
-                auto w_buf = sample_weight.request();
+            if (sample_weights.size() > 0) {
+                auto w_buf = sample_weights.request();
                 weight_ptr = static_cast<const rf::real_t*>(w_buf.ptr);
             }
             
@@ -4994,17 +5111,17 @@ PYBIND11_MODULE(RFXFuse, m) {
         // NOTE: Outlier detection is ON-DEMAND only via compute_outlier_scores(mode='greedy'|'full')
         // Requires compute_leaf_assignments=True. Uses leaf assignments, NOT full proximity matrix.
         // Auto-detecting fit: accepts both dense numpy arrays and scipy sparse matrices
-        .def("fit", [](RandomForestUnsupervised& self, py::object X, py::array_t<rf::real_t> sample_weight) {
+        .def("fit", [](RandomForestUnsupervised& self, py::object X, py::array_t<rf::real_t> sample_weights) {
             if (is_scipy_sparse(X)) {
                 // Auto-detected sparse input - enable sparse mode and call fit_sparse
                 self.set_use_sparse(true);
-                return self.fit_sparse(X, sample_weight);
+                return self.fit_sparse(X, sample_weights);
             } else {
                 // Dense input - call regular fit
                 py::array_t<rf::real_t> X_dense = X.cast<py::array_t<rf::real_t>>();
-                return self.fit(X_dense, sample_weight);
+                return self.fit(X_dense, sample_weights);
             }
-        }, py::arg("X"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+        }, py::arg("X"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit the unsupervised random forest model. Auto-detects scipy.sparse matrices and uses sparse kernels automatically.")
         .def("fit_sparse", [](RandomForestUnsupervised& self, py::object X_sparse) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
@@ -5012,10 +5129,10 @@ PYBIND11_MODULE(RFXFuse, m) {
         }, py::arg("X"),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix). "
            "For unsupervised learning on sparse data (e.g., user-item matrices).")
-        .def("fit_sparse", [](RandomForestUnsupervised& self, py::object X_sparse, py::array_t<rf::real_t> sample_weight) {
+        .def("fit_sparse", [](RandomForestUnsupervised& self, py::object X_sparse, py::array_t<rf::real_t> sample_weights) {
             self.set_use_sparse(true);  // Auto-enable sparse mode
-            return self.fit_sparse(X_sparse, sample_weight);
-        }, py::arg("X"), py::arg("sample_weight") = py::array_t<rf::real_t>(),
+            return self.fit_sparse(X_sparse, sample_weights);
+        }, py::arg("X"), py::arg("sample_weights") = py::array_t<rf::real_t>(),
            "Fit using sparse matrix input (scipy.sparse.csr_matrix) with sample weights.")
         .def("predict", &RandomForestUnsupervised::predict)
         .def("predict_proba", &RandomForestUnsupervised::predict_proba,
@@ -6958,6 +7075,7 @@ except Exception as e:
         m.attr("impute_topk_median") = impute_mod.attr("rfx_impute_topk_median");
         m.attr("impute_knn_mean") = impute_mod.attr("rfx_impute_knn_mean");
         m.attr("impute_knn_median") = impute_mod.attr("rfx_impute_knn_median");
+        m.attr("Imputer") = impute_mod.attr("Imputer");
     } catch (...) {
         // rfx_impute.py not available - imputation functions won't be on module
     }

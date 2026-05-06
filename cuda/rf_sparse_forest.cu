@@ -125,43 +125,59 @@ __global__ void gpu_compute_tnodewt_sparse_kernel(
 // ============================================================================
 
 // Sequential bootstrap kernel (for single tree)
+// sample_weights_cum: cumulative weights for weighted sampling (nullptr = uniform)
 __global__ void gpu_bootstrap_kernel(
     integer_t nsample,
     integer_t tree_id,
     curandState* rng_states,
     integer_t* nin,  // [nsample] - bootstrap frequency
-    real_t* win      // [nsample] - bootstrap weights
+    real_t* win,     // [nsample] - bootstrap weights
+    const real_t* sample_weights_cum,
+    real_t total_sample_weight
 ) {
-    // Single thread generates bootstrap sample
     int tid = threadIdx.x + blockIdx.x * blockDim.x;
     if (tid != 0) return;
     
-    // Initialize nin and win to 0
     for (integer_t i = 0; i < nsample; i++) {
         nin[i] = 0;
         win[i] = 0.0f;
     }
     
-    // Sample nsample with replacement
-    // Use tree-specific RNG state (matches GPU Dense architecture)
-    curandState local_state = rng_states[tree_id];  // Direct index, not modulo
+    curandState local_state = rng_states[tree_id];
     for (integer_t i = 0; i < nsample; i++) {
-        integer_t idx = static_cast<integer_t>(curand_uniform(&local_state) * nsample);
-        if (idx >= nsample) idx = nsample - 1;
+        real_t rand_val = curand_uniform(&local_state);
+        integer_t idx;
+        
+        if (sample_weights_cum != nullptr) {
+            real_t target = rand_val * total_sample_weight;
+            integer_t lo = 0, hi = nsample - 1;
+            while (lo < hi) {
+                integer_t mid = lo + (hi - lo) / 2;
+                if (sample_weights_cum[mid] < target) lo = mid + 1;
+                else hi = mid;
+            }
+            idx = lo;
+        } else {
+            idx = static_cast<integer_t>(rand_val * nsample);
+            if (idx >= nsample) idx = nsample - 1;
+        }
+        
         nin[idx]++;
         win[idx] += 1.0f;
     }
-    rng_states[tree_id] = local_state;  // Save updated state
+    rng_states[tree_id] = local_state;
 }
 
 // Parallel bootstrap kernel - one block per tree, all threads participate
-// This is ~256x faster than sequential for large datasets (Netflix scale)
+// sample_weights_cum: cumulative weights for weighted sampling (nullptr = uniform)
 __global__ void gpu_bootstrap_batch_kernel(
     integer_t nsample,
     integer_t num_trees,
     curandState* rng_states,
     integer_t* nin_all,  // [num_trees * nsample] - bootstrap frequency
-    real_t* win_all      // [num_trees * nsample] - bootstrap weights
+    real_t* win_all,     // [num_trees * nsample] - bootstrap weights
+    const real_t* sample_weights_cum,
+    real_t total_sample_weight
 ) {
     integer_t tree_id = blockIdx.x;
     if (tree_id >= num_trees) return;
@@ -173,27 +189,35 @@ __global__ void gpu_bootstrap_batch_kernel(
     integer_t* nin = nin_all + offset;
     real_t* win = win_all + offset;
     
-    // Initialize nin and win to 0 (parallel)
     for (integer_t i = tid; i < nsample; i += stride) {
         nin[i] = 0;
         win[i] = 0.0f;
     }
     __syncthreads();
     
-    // Parallel bootstrap sampling - each thread generates subset of samples
-    // Use tree-specific RNG with thread offset for deterministic parallel generation
     curandState local_state = rng_states[tree_id];
     
-    // Each thread handles a subset of the nsample bootstrap draws
     for (integer_t i = tid; i < nsample; i += stride) {
-        // Skip to this thread's position in the RNG sequence
         curandState thread_state = local_state;
         skipahead(i, &thread_state);
         
-        integer_t idx = static_cast<integer_t>(curand_uniform(&thread_state) * nsample);
-        if (idx >= nsample) idx = nsample - 1;
+        real_t rand_val = curand_uniform(&thread_state);
+        integer_t idx;
         
-        // Atomic increment for thread-safe counting
+        if (sample_weights_cum != nullptr) {
+            real_t target = rand_val * total_sample_weight;
+            integer_t lo = 0, hi = nsample - 1;
+            while (lo < hi) {
+                integer_t mid = lo + (hi - lo) / 2;
+                if (sample_weights_cum[mid] < target) lo = mid + 1;
+                else hi = mid;
+            }
+            idx = lo;
+        } else {
+            idx = static_cast<integer_t>(rand_val * nsample);
+            if (idx >= nsample) idx = nsample - 1;
+        }
+        
         ::atomicAdd(&nin[idx], 1);
         ::atomicAdd(&win[idx], 1.0f);
     }
@@ -390,7 +414,9 @@ integer_t train_sparse_forest_gpu(
     // OOB tracking for Breiman's proximity (optional, nullptr to skip)
     integer_t* h_nin_all,  // [ntree * nsample] - bootstrap membership per tree (0 = OOB)
     // Progress callback (optional, nullptr to skip)
-    std::function<void(integer_t, integer_t)> progress_callback
+    std::function<void(integer_t, integer_t)> progress_callback,
+    // Bootstrap weights (optional, nullptr = uniform bootstrap)
+    const real_t* bootstrap_weights
 ) {
     cudaStream_t stream;
     cudaStreamCreate(&stream);
@@ -577,6 +603,22 @@ integer_t train_sparse_forest_gpu(
         h_weight_sums.resize(config.nsample, 0.0f);
     }
     
+    // Compute cumulative bootstrap weights on GPU (if provided)
+    real_t* d_sample_weights_cum = nullptr;
+    real_t total_sample_weight = 0.0f;
+    if (bootstrap_weights != nullptr) {
+        std::vector<real_t> cum(config.nsample);
+        cum[0] = bootstrap_weights[0];
+        for (integer_t i = 1; i < config.nsample; ++i) {
+            cum[i] = cum[i - 1] + bootstrap_weights[i];
+        }
+        total_sample_weight = cum[config.nsample - 1];
+        cudaMalloc(&d_sample_weights_cum, config.nsample * sizeof(real_t));
+        cudaMemcpyAsync(d_sample_weights_cum, cum.data(), config.nsample * sizeof(real_t),
+                        cudaMemcpyHostToDevice, stream);
+        cudaStreamSynchronize(stream);
+    }
+    
     // ========================================================================
     // BATCHED TRAINING LOOP - Process batch_size trees at a time
     // ========================================================================
@@ -588,7 +630,8 @@ integer_t train_sparse_forest_gpu(
         
         // Step 1: Bootstrap batch trees in parallel
         gpu_bootstrap_batch_kernel<<<batch_trees, 256, 0, stream>>>(
-            config.nsample, batch_trees, d_rng_states + batch_start, d_nin_batch, d_win_batch
+            config.nsample, batch_trees, d_rng_states + batch_start, d_nin_batch, d_win_batch,
+            d_sample_weights_cum, total_sample_weight
         );
         cudaStreamSynchronize(stream);
         
@@ -670,6 +713,7 @@ integer_t train_sparse_forest_gpu(
         cudaFree(d_nodextr);
         cudaFree(d_rng_states);
         cudaFree(d_seeds);
+        if (d_sample_weights_cum) cudaFree(d_sample_weights_cum);
         cudaFree(d_oob_votes);
         cudaFree(d_oob_counts);
         if (d_oob_predictions_regression) cudaFree(d_oob_predictions_regression);
@@ -1282,6 +1326,7 @@ integer_t train_sparse_forest_gpu(
     cudaFree(d_nodextr);
     cudaFree(d_rng_states);
     cudaFree(d_seeds);
+    if (d_sample_weights_cum) cudaFree(d_sample_weights_cum);
     cudaFree(d_error);
     
     if (d_avimp) cudaFree(d_avimp);

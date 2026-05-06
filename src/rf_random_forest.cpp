@@ -60,7 +60,8 @@ namespace rf {
                                     const uint8_t* X_binned,
                                     const real_t* bin_edges_all,
                                     const integer_t* n_bins_per_feature,
-                                    integer_t max_bins);
+                                    integer_t max_bins,
+                                    const real_t* bootstrap_weights);
     
     // GPU histogram data structure (forward declaration - implemented in cuda/rf_histogram_gpu.cu)
     namespace cuda {
@@ -499,25 +500,25 @@ void RandomForest::set_categorical_features(const integer_t* cat_array, integer_
 }
 
 // Unified fit method that dispatches based on task type
-void RandomForest::fit(const real_t* X, const void* y, const real_t* sample_weight) {
+void RandomForest::fit(const real_t* X, const void* y, const real_t* sample_weights) {
     // Set global config values that CPU/GPU code needs
     rf::g_config.use_casewise = config_.use_casewise;
-    
+
     switch (config_.task_type) {
         case TaskType::CLASSIFICATION:
-            fit_classification(X, static_cast<const integer_t*>(y), sample_weight);
+            fit_classification(X, static_cast<const integer_t*>(y), sample_weights);
             break;
         case TaskType::REGRESSION:
-            fit_regression(X, static_cast<const real_t*>(y), sample_weight);
+            fit_regression(X, static_cast<const real_t*>(y), sample_weights);
             break;
         case TaskType::UNSUPERVISED:
-            fit_unsupervised(X, sample_weight);
+            fit_unsupervised(X, sample_weights);
             break;
     }
 }
 
 // Classification training
-void RandomForest::fit_classification(const real_t* X, const integer_t* y, const real_t* sample_weight) {
+void RandomForest::fit_classification(const real_t* X, const integer_t* y, const real_t* sample_weights) {
     // Training message handled by Python wrapper
     
     // Lazy CUDA initialization (only when actually needed)
@@ -549,10 +550,14 @@ void RandomForest::fit_classification(const real_t* X, const integer_t* y, const
     X_train_.assign(X, X + x_train_size);
     y_train_classification_.assign(y, y + config_.nsample);
 
-    if (sample_weight) {
-        sample_weight_.assign(sample_weight, sample_weight + config_.nsample);
+    // Casewise weights are always 1.0 (internal, not user-controlled)
+    casewise_weights_.assign(config_.nsample, 1.0f);
+
+    // Store bootstrap sampling weights if provided
+    if (sample_weights) {
+        bootstrap_weights_.assign(sample_weights, sample_weights + config_.nsample);
     } else {
-        sample_weight_.resize(config_.nsample, 1.0f);
+        bootstrap_weights_.clear();
     }
 
     // Setup classification-specific parameters
@@ -635,7 +640,7 @@ void RandomForest::fit_classification(const real_t* X, const integer_t* y, const
     rf::g_config.gpu_parallel_mode0 = (batch_size > 1);
     
 #ifdef CUDA_FOUND
-    fit_batch_gpu(X, y, sample_weight_.data(), batch_size);
+    fit_batch_gpu(X, y, casewise_weights_.data(), batch_size);
 #else
     throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -683,7 +688,7 @@ void RandomForest::fit_classification(const real_t* X, const integer_t* y, const
 }
 
 // Regression training
-void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t* sample_weight) {
+void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t* sample_weights) {
     // Training message handled by Python wrapper
     // std::cout << "Training Random Forest Regressor with " << config_.ntree << " trees...\n";
     
@@ -736,10 +741,11 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
     X_train_.assign(X, X + x_train_size);
     y_train_regression_.assign(y, y + config_.nsample);
 
-    if (sample_weight) {
-        sample_weight_.assign(sample_weight, sample_weight + config_.nsample);
+    casewise_weights_.assign(config_.nsample, 1.0f);
+    if (sample_weights) {
+        bootstrap_weights_.assign(sample_weights, sample_weights + config_.nsample);
     } else {
-        sample_weight_.resize(config_.nsample, 1.0f);
+        bootstrap_weights_.clear();
     }
 
     // Setup regression-specific parameters
@@ -954,7 +960,7 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
         //           << ", use_casewise=" << config_.use_casewise << std::endl;
         
 #ifdef CUDA_FOUND
-        fit_batch_gpu(X, y, sample_weight_.data(), batch_size);
+        fit_batch_gpu(X, y, casewise_weights_.data(), batch_size);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -979,7 +985,7 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
 }
 
 // Unsupervised training
-void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight) {
+void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weights_unused) {
     // Set global config values that CPU/GPU code needs
     rf::g_config.use_casewise = config_.use_casewise;
     
@@ -1038,11 +1044,11 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
     // Store original training data
     X_train_.assign(X, X + config_.mdim * config_.nsample);
 
-    if (sample_weight) {
-        sample_weight_.assign(sample_weight, sample_weight + config_.nsample);
-    } else {
-        sample_weight_.resize(config_.nsample, 1.0f);
-    }
+    casewise_weights_.assign(config_.nsample, 1.0f);
+    // TODO: sample_weights for unsupervised bootstrap not yet supported —
+    // need to decide how to expand user weights to cover synthetic samples.
+    // See docs/SAMPLE_WEIGHTS_UNSUPERVISED_TODO.md
+    bootstrap_weights_.clear();
 
     // ========================================================================
     // UNSUPERVISED: Create synthetic data with permuted features (Breiman-Cutler)
@@ -1087,13 +1093,8 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
     std::fill(y_train_unsupervised_.begin(), y_train_unsupervised_.begin() + n_real, 1);  // Real = class 1
     std::fill(y_train_unsupervised_.begin() + n_real, y_train_unsupervised_.end(), 0);   // Synthetic = class 0
     
-    // Expand sample weights
-    std::vector<real_t> expanded_weights(n_total_unsupervised_, 1.0f);
-    for (integer_t i = 0; i < n_real; ++i) {
-        expanded_weights[i] = sample_weight_[i];
-    }
-    // Synthetic samples get weight 1.0 (already initialized)
-    sample_weight_ = std::move(expanded_weights);
+    // Expand casewise weights for synthetic samples (all 1.0)
+    casewise_weights_.resize(n_total_unsupervised_, 1.0f);
     
     // Update config to use expanded data size
     config_.nsample = n_total_unsupervised_;
@@ -1202,7 +1203,7 @@ void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weight
         
 #ifdef CUDA_FOUND
         fit_batch_gpu(X, y_train_unsupervised_.data(),
-                      sample_weight_.data(), batch_size);
+                      casewise_weights_.data(), batch_size);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -1277,8 +1278,8 @@ void RandomForest::grow_tree_single(integer_t tree_id, integer_t seed) {
     // Use pre-allocated workspace arrays to avoid repeated allocation/deallocation
     integer_t ninbag, noobag;
 
-    if (sample_weight_.empty()) {
-        // printf("ERROR: sample_weight_ is empty!\n");  // Commented to avoid stream conflicts
+    if (casewise_weights_.empty()) {
+        // printf("ERROR: casewise_weights_ is empty!\n");  // Commented to avoid stream conflicts
         // fflush(stdout);
         return;
     }
@@ -1290,8 +1291,9 @@ void RandomForest::grow_tree_single(integer_t tree_id, integer_t seed) {
     // Bootstrap sampling
     // printf("DEBUG: Actually calling cpu_bootstrap now...\n");
     // fflush(stdout);
-    cpu_bootstrap(sample_weight_.data(), config_.nsample, win_workspace_.data(), nin_workspace_.data(),
-              nout_.data(), jinbag_workspace_.data(), joobag_workspace_.data(), ninbag, noobag, tree_id);
+    cpu_bootstrap(casewise_weights_.data(), config_.nsample, win_workspace_.data(), nin_workspace_.data(),
+              nout_.data(), jinbag_workspace_.data(), joobag_workspace_.data(), ninbag, noobag, tree_id,
+              bootstrap_weights_.empty() ? nullptr : bootstrap_weights_.data());
     // printf("DEBUG: cpu_bootstrap returned successfully\n");
     // fflush(stdout);
     
@@ -1997,7 +1999,7 @@ void RandomForest::grow_tree_single(integer_t tree_id, integer_t seed) {
 
 #ifdef CUDA_FOUND
 void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
-                                   const real_t* sample_weight, integer_t batch_size) {
+                                   const real_t* casewise_weights, integer_t batch_size) {
     // DEBUG: Enable verbose logging to track segfaults
     const bool DEBUG_SEGFAULT = false;  // Set to true to debug segfaults
     if (DEBUG_SEGFAULT) {
@@ -2275,7 +2277,7 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
         }
         
         gpu_growtree_batch(
-            num_trees_batch, X, sample_weight, y_data,
+            num_trees_batch, X, casewise_weights, y_data,
             static_cast<integer_t>(config_.task_type),
             cat_.data(), ties_.data(), nin_batch.data(),
             (config_.task_type == TaskType::REGRESSION) ? y_train_regression_.data() : nullptr,
@@ -2310,7 +2312,8 @@ void RandomForest::fit_batch_gpu(const real_t* X, const void* y,
             X_binned_ptr,
             bin_edges_ptr,
             n_bins_ptr,
-            config_.n_bins
+            config_.n_bins,
+            bootstrap_weights_.empty() ? nullptr : bootstrap_weights_.data()
         );
         
         // std::cout << "[FIT_BATCH] gpu_growtree_batch RETURNED for batch " << batch_start << "-" << (batch_end-1) << std::endl;
@@ -2723,7 +2726,7 @@ void RandomForest::finalize_training() {
 // ============================================================================
 void RandomForest::fit_sparse_gpu_classification(const SparseMatrixCSR& X, 
                                                   const integer_t* y, 
-                                                  const real_t* sample_weight) {
+                                                  const real_t* sample_weights) {
     // Ensure CUDA context is ready
     rf::cuda::cuda_ensure_context_ready();
     
@@ -2844,7 +2847,8 @@ void RandomForest::fit_sparse_gpu_classification(const SparseMatrixCSR& X,
         // OOB tracking for Breiman's proximity
         config_.compute_leaf_assignments ? h_nin_all.data() : nullptr,
         // Progress callback
-        progress_callback_
+        progress_callback_,
+        bootstrap_weights_.empty() ? nullptr : bootstrap_weights_.data()
     );
     
     if (err != 0) {
@@ -2907,7 +2911,7 @@ void RandomForest::fit_sparse_gpu_classification(const SparseMatrixCSR& X,
 // ============================================================================
 void RandomForest::fit_sparse_gpu_regression(const SparseMatrixCSR& X, 
                                               const real_t* y, 
-                                              const real_t* sample_weight) {
+                                              const real_t* sample_weights) {
     // NOTE: Regression GPU sparse uses same local importance handling as classification
     // The localimp() transformation is applied after copying qimpm_ from GPU
     
@@ -3031,7 +3035,8 @@ void RandomForest::fit_sparse_gpu_regression(const SparseMatrixCSR& X,
         // OOB tracking for Breiman's proximity
         config_.compute_leaf_assignments ? h_nin_all.data() : nullptr,
         // Progress callback
-        progress_callback_
+        progress_callback_,
+        bootstrap_weights_.empty() ? nullptr : bootstrap_weights_.data()
     );
     
     if (err != 0) {
@@ -3091,7 +3096,7 @@ void RandomForest::fit_sparse_gpu_regression(const SparseMatrixCSR& X,
 // GPU SPARSE UNSUPERVISED - Uses parallel GPU sparse tree growing
 // ============================================================================
 void RandomForest::fit_sparse_gpu_unsupervised(const SparseMatrixCSR& X, 
-                                                const real_t* sample_weight) {
+                                                const real_t* sample_weights) {
     // Ensure CUDA context is ready
     rf::cuda::cuda_ensure_context_ready();
     
@@ -3213,7 +3218,8 @@ void RandomForest::fit_sparse_gpu_unsupervised(const SparseMatrixCSR& X,
         // OOB tracking for Breiman's proximity
         config_.compute_leaf_assignments ? h_nin_all.data() : nullptr,
         // Progress callback
-        progress_callback_
+        progress_callback_,
+        bootstrap_weights_.empty() ? nullptr : bootstrap_weights_.data()
     );
     
     if (err != 0) {
@@ -4963,7 +4969,7 @@ std::vector<double> RandomForest::compute_mds_from_factors(rf::integer_t k) cons
 // Memory: O(nnz) for data, O(n×rank) for low-rank proximity
 // ============================================================================
 
-void RandomForest::fit_sparse(const SparseMatrixCSR& X, const void* y, const real_t* sample_weight) {
+void RandomForest::fit_sparse(const SparseMatrixCSR& X, const void* y, const real_t* sample_weights) {
     // Validate sparse matrix
     if (!X.is_valid()) {
         throw std::runtime_error("Invalid sparse matrix: CSR structure is malformed");
@@ -4980,18 +4986,18 @@ void RandomForest::fit_sparse(const SparseMatrixCSR& X, const void* y, const rea
     // Dispatch based on task type
     switch (config_.task_type) {
         case TaskType::CLASSIFICATION:
-            fit_classification_sparse(X, static_cast<const integer_t*>(y), sample_weight);
+            fit_classification_sparse(X, static_cast<const integer_t*>(y), sample_weights);
             break;
         case TaskType::REGRESSION:
-            fit_regression_sparse(X, static_cast<const real_t*>(y), sample_weight);
+            fit_regression_sparse(X, static_cast<const real_t*>(y), sample_weights);
             break;
         case TaskType::UNSUPERVISED:
-            fit_unsupervised_sparse(X, sample_weight);
+            fit_unsupervised_sparse(X, sample_weights);
             break;
     }
 }
 
-void RandomForest::fit_classification_sparse(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weight) {
+void RandomForest::fit_classification_sparse(const SparseMatrixCSR& X, const integer_t* y, const real_t* sample_weights) {
     // ============================================================================
     // NATIVE SPARSE CLASSIFICATION - O(nnz) memory, NO dense conversion
     // ============================================================================
@@ -5007,11 +5013,11 @@ void RandomForest::fit_classification_sparse(const SparseMatrixCSR& X, const int
     // Store y data (classification labels)
     y_train_classification_.assign(y, y + config_.nsample);
     
-    // Initialize sample weights
-    if (sample_weight) {
-        sample_weight_.assign(sample_weight, sample_weight + config_.nsample);
+    casewise_weights_.assign(config_.nsample, 1.0f);
+    if (sample_weights) {
+        bootstrap_weights_.assign(sample_weights, sample_weights + config_.nsample);
     } else {
-        sample_weight_.resize(config_.nsample, 1.0f);
+        bootstrap_weights_.clear();
     }
     
     // Setup classification task (creates 1-based labels, counts classes)
@@ -5043,7 +5049,7 @@ void RandomForest::fit_classification_sparse(const SparseMatrixCSR& X, const int
     if (config_.use_gpu) {
 #ifdef CUDA_FOUND
         // GPU SPARSE PATH - use parallel GPU sparse training
-        fit_sparse_gpu_classification(X, y, sample_weight);
+        fit_sparse_gpu_classification(X, y, sample_weights);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -5081,7 +5087,7 @@ void RandomForest::fit_classification_sparse(const SparseMatrixCSR& X, const int
     
 }
 
-void RandomForest::fit_regression_sparse(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weight) {
+void RandomForest::fit_regression_sparse(const SparseMatrixCSR& X, const real_t* y, const real_t* sample_weights) {
     // ============================================================================
     // NATIVE SPARSE REGRESSION - O(nnz) memory, NO dense conversion
     // ============================================================================
@@ -5096,11 +5102,11 @@ void RandomForest::fit_regression_sparse(const SparseMatrixCSR& X, const real_t*
     // Store y data (regression targets)
     y_train_regression_.assign(y, y + config_.nsample);
     
-    // Initialize sample weights
-    if (sample_weight) {
-        sample_weight_.assign(sample_weight, sample_weight + config_.nsample);
+    casewise_weights_.assign(config_.nsample, 1.0f);
+    if (sample_weights) {
+        bootstrap_weights_.assign(sample_weights, sample_weights + config_.nsample);
     } else {
-        sample_weight_.resize(config_.nsample, 1.0f);
+        bootstrap_weights_.clear();
     }
     
     // Setup regression task
@@ -5129,7 +5135,7 @@ void RandomForest::fit_regression_sparse(const SparseMatrixCSR& X, const real_t*
     if (config_.use_gpu) {
 #ifdef CUDA_FOUND
         // GPU SPARSE PATH - use parallel GPU sparse training
-        fit_sparse_gpu_regression(X, y, sample_weight);
+        fit_sparse_gpu_regression(X, y, sample_weights);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif
@@ -5162,7 +5168,7 @@ void RandomForest::fit_regression_sparse(const SparseMatrixCSR& X, const real_t*
     }
 }
 
-void RandomForest::fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_t* sample_weight) {
+void RandomForest::fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_t* sample_weights_unused) {
     // ============================================================================
     // NATIVE SPARSE UNSUPERVISED - O(nnz) memory, NO dense conversion
     // Breiman-Cutler: Real samples (class 1) vs Synthetic samples (class 0)
@@ -5346,13 +5352,10 @@ void RandomForest::fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_
     // Update maxnode for expanded sample count (trees need more nodes)
     config_.maxnode = calculate_maxnode(config_.nsample, config_.minndsize);
     
-    // Initialize sample weights
-    sample_weight_.resize(n_total_unsupervised_, 1.0f);
-    if (sample_weight) {
-        for (integer_t i = 0; i < n_real; ++i) {
-            sample_weight_[i] = sample_weight[i];
-        }
-    }
+    casewise_weights_.assign(n_total_unsupervised_, 1.0f);
+    // TODO: sample_weights for unsupervised bootstrap not yet supported —
+    // see docs/SAMPLE_WEIGHTS_UNSUPERVISED_TODO.md
+    bootstrap_weights_.clear();
     
     // Setup unsupervised task parameters
     setup_unsupervised_task();
@@ -5383,7 +5386,7 @@ void RandomForest::fit_unsupervised_sparse(const SparseMatrixCSR& X, const real_
 #ifdef CUDA_FOUND
         // GPU SPARSE PATH - use parallel GPU sparse training
         // IMPORTANT: Pass the combined matrix (real + synthetic), not the original X!
-        fit_sparse_gpu_unsupervised(X_train_sparse_, sample_weight_.data());
+        fit_sparse_gpu_unsupervised(X_train_sparse_, nullptr);
 #else
         throw std::runtime_error("GPU support not available in this CPU-only build. Set use_gpu=False.");
 #endif

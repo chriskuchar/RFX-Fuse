@@ -9,11 +9,13 @@ namespace rf {
 // __global__ void gpu_bootstrap_kernel(...) - declared where needed
 
 // Main wrapper - automatically selects GPU or CPU (matches boot_cuda in Fortran)
+// sample_weights: per-sample probability weights for bootstrap draw selection (nullptr = uniform)
 void gpu_bootstrap(const real_t* weight, integer_t nsample,
                real_t* win, integer_t* nin, integer_t* nout,
                integer_t* jinbag, integer_t* joobag,
                integer_t& ninbag, integer_t& noobag,
-               integer_t tree_id = 0);
+               integer_t tree_id = 0,
+               const real_t* sample_weights = nullptr);
 
 
 // Cleanup function for global bootstrap states
