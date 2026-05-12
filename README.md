@@ -29,7 +29,7 @@ These capabilities enable it to be a unified learning and similarity engine. Wit
 
 <img src="examples/recommender_system/first_page_figure.png" width="50%" alt="Proximity Importance Example">
 
-*Explanations available in [Zenodo paper](https://doi.org/10.5281/zenodo.18397354).*
+*Explanations available in [arXiv paper](https://arxiv.org/html/2603.13234v1).*
 
 2. **Imputation Quality Validation for General Tabular Data** — Rank imputation methods by how "real" the imputed data looks, without ground truth labels.
 
