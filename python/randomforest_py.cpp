@@ -5859,6 +5859,7 @@ fig.update_scenes(
                             }));
                         }
                         
+)" R"(
                         // Step 4: Clear layout selections (critical for 3D plots and lasso selections)
                         // This must clear ALL axis selections for ALL subplots to handle lasso selections
                         const layoutUpdate = {
