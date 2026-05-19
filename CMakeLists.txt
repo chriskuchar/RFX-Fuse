@@ -67,12 +67,14 @@ option(RFX_PORTABLE "Build portable binaries for wheel distribution" OFF)
 
 # Compiler flags
 if(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /DNDEBUG")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /DNDEBUG /openmp:llvm")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64|ARM64"
+       OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
+elseif(APPLE AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
 else()
     if(RFX_PORTABLE OR RFX_CPU_ONLY)
-        # -mavx2: required because rf_vectorized_ops.cpp uses AVX intrinsics
-        # (runtime dispatch falls back to scalar on non-AVX CPUs)
-        # AVX2 has been on all x86-64 CPUs since Haswell (2013)
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -mavx2 -mfma -DNDEBUG")
     else()
         set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O3 -march=native")

@@ -330,7 +330,7 @@ ImputationResults impute_missing_cpu_dense(
     auto initial_start = std::chrono::high_resolution_clock::now();
     
     #pragma omp parallel for schedule(dynamic)
-    for (size_t idx = 0; idx < features_with_missing.size(); ++idx) {
+    for (int idx = 0; idx < static_cast<int>(features_with_missing.size()); ++idx) {
         integer_t j = features_with_missing[idx];
         
         // Extract column data

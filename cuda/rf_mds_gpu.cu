@@ -7,6 +7,7 @@
 #include <cusolverDn.h>
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <iostream>
 
 namespace rf {

@@ -5,7 +5,9 @@
 #include "rf_config.hpp"
 #include "rf_memory_pool.hpp"
 #include "rf_vectorized_ops.hpp"
-#include <immintrin.h>
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+  #include <immintrin.h>
+#endif
 #include <memory>
 #include <array>
 #include <bitset>
@@ -144,8 +146,13 @@ struct LoopUnroller {
 // ============================================================================
 
 // Branch prediction hints
-#define LIKELY(x)   __builtin_expect(!!(x), 1)
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#if defined(_MSC_VER)
+  #define LIKELY(x)   (x)
+  #define UNLIKELY(x) (x)
+#else
+  #define LIKELY(x)   __builtin_expect(!!(x), 1)
+  #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+#endif
 
 // Optimized split finding with branch prediction
 class BranchOptimizedSplitFinder {
@@ -201,30 +208,33 @@ class MemoryPrefetcher {
 public:
     static void prefetch_tree_data(const CacheOptimizedTreeNode* nodes, 
                                   integer_t node_id, integer_t depth) {
-        // Prefetch current node
+#if defined(_MSC_VER)
+        _mm_prefetch(reinterpret_cast<const char*>(&nodes[node_id]), _MM_HINT_T0);
+        if (LIKELY(nodes[node_id].left_child >= 0))
+            _mm_prefetch(reinterpret_cast<const char*>(&nodes[nodes[node_id].left_child]), _MM_HINT_T1);
+        if (LIKELY(nodes[node_id].right_child >= 0))
+            _mm_prefetch(reinterpret_cast<const char*>(&nodes[nodes[node_id].right_child]), _MM_HINT_T1);
+        if (LIKELY(nodes[node_id].sibling >= 0))
+            _mm_prefetch(reinterpret_cast<const char*>(&nodes[nodes[node_id].sibling]), _MM_HINT_T2);
+#else
         __builtin_prefetch(&nodes[node_id], 0, 3);
-        
-        // Prefetch likely next nodes (left child)
-        if (LIKELY(nodes[node_id].left_child >= 0)) {
+        if (LIKELY(nodes[node_id].left_child >= 0))
             __builtin_prefetch(&nodes[nodes[node_id].left_child], 0, 2);
-        }
-        
-        // Prefetch likely next nodes (right child)
-        if (LIKELY(nodes[node_id].right_child >= 0)) {
+        if (LIKELY(nodes[node_id].right_child >= 0))
             __builtin_prefetch(&nodes[nodes[node_id].right_child], 0, 2);
-        }
-        
-        // Prefetch sibling node for parallel processing
-        if (LIKELY(nodes[node_id].sibling >= 0)) {
+        if (LIKELY(nodes[node_id].sibling >= 0))
             __builtin_prefetch(&nodes[nodes[node_id].sibling], 0, 1);
-        }
+#endif
     }
     
     static void prefetch_feature_data(const real_t* features, integer_t feature_idx,
                                     integer_t sample_start, integer_t sample_end) {
-        // Prefetch feature values for current batch
         for (integer_t i = sample_start; i < sample_end; i += 16) {
+#if defined(_MSC_VER)
+            _mm_prefetch(reinterpret_cast<const char*>(&features[feature_idx * sample_end + i]), _MM_HINT_T0);
+#else
             __builtin_prefetch(&features[feature_idx * sample_end + i], 0, 3);
+#endif
         }
     }
 };

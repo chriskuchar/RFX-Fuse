@@ -6018,6 +6018,7 @@ fig.update_scenes(
                         isUpdating = false;
                     }
                 }
+)" R"(
                 
                 function applySelectionToAll(selectedIndices) {
                     if (isUpdating) return;
@@ -6199,6 +6200,7 @@ fig.update_scenes(
                     // Cross-origin iframe, can't access parent
                 }
                 
+)" R"(
                 // Also attach to the plotly graph div and 3D scene for direct interaction
                 if (gd) {
                     // Make plot div focusable so it can receive keyboard events

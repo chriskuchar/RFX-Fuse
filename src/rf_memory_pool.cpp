@@ -3,6 +3,23 @@
 #include <algorithm>
 #include <cstring>
 
+#if defined(_MSC_VER)
+#include <malloc.h>
+static inline void* rfx_aligned_alloc(size_t alignment, size_t size) {
+    return _aligned_malloc(size, alignment);
+}
+static inline void rfx_aligned_free(void* ptr) {
+    _aligned_free(ptr);
+}
+#else
+static inline void* rfx_aligned_alloc(size_t alignment, size_t size) {
+    return std::aligned_alloc(alignment, size);
+}
+static inline void rfx_aligned_free(void* ptr) {
+    std::free(ptr);
+}
+#endif
+
 namespace rf {
 
 // Global memory pool instance
@@ -20,7 +37,7 @@ MemoryPool::MemoryPool(size_t initial_size)
 MemoryPool::~MemoryPool() {
     for (auto& block : blocks_) {
         if (block.ptr) {
-            std::free(block.ptr);
+            rfx_aligned_free(block.ptr);
         }
     }
 }
@@ -48,7 +65,7 @@ void* MemoryPool::allocate(size_t size, size_t alignment) {
     }
     
     // Fallback to system allocation
-    void* ptr = std::aligned_alloc(alignment, size);
+    void* ptr = rfx_aligned_alloc(alignment, size);
     if (ptr) {
         total_allocated_ += size;
         current_usage_ += size;
@@ -70,7 +87,7 @@ void MemoryPool::deallocate(void* ptr, size_t size) {
     }
     
     // Not found in pool, free with system
-    std::free(ptr);
+    rfx_aligned_free(ptr);
     current_usage_ -= size;
 }
 
@@ -87,7 +104,7 @@ void MemoryPool::expand_pool(size_t min_size) {
     size_t expand_size = std::max(min_size, total_allocated_ / 2);
     expand_size = std::max(expand_size, size_t(1024 * 1024)); // At least 1MB
     
-    void* ptr = std::aligned_alloc(64, expand_size);
+    void* ptr = rfx_aligned_alloc(64, expand_size);
     if (ptr) {
         blocks_.push_back({ptr, expand_size, false});
         total_allocated_ += expand_size;
@@ -215,7 +232,7 @@ void FastArray<T>::resize(size_type new_size) {
             if (pool_) {
                 pool_->deallocate(old_data, old_size * sizeof(T));
             } else {
-                std::free(old_data);
+                rfx_aligned_free(old_data);
             }
         }
         size_ = new_size;
@@ -242,7 +259,7 @@ void FastArray<T>::reserve(size_type new_capacity) {
             if (pool_) {
                 pool_->deallocate(old_data, old_size * sizeof(T));
             } else {
-                std::free(old_data);
+                rfx_aligned_free(old_data);
             }
         }
     }
@@ -264,7 +281,7 @@ void FastArray<T>::shrink_to_fit() {
             if (pool_) {
                 pool_->deallocate(old_data, old_size * sizeof(T));
             } else {
-                std::free(old_data);
+                rfx_aligned_free(old_data);
             }
         }
     }
@@ -275,7 +292,7 @@ void FastArray<T>::allocate(size_type size) {
     if (pool_) {
         data_ = static_cast<T*>(pool_->allocate(size * sizeof(T), alignof(T)));
     } else {
-        data_ = static_cast<T*>(std::aligned_alloc(alignof(T), size * sizeof(T)));
+        data_ = static_cast<T*>(rfx_aligned_alloc(alignof(T), size * sizeof(T)));
     }
     capacity_ = size;
 }
@@ -286,7 +303,7 @@ void FastArray<T>::deallocate() {
         if (pool_) {
             pool_->deallocate(data_, capacity_ * sizeof(T));
         } else {
-            std::free(data_);
+            rfx_aligned_free(data_);
         }
         data_ = nullptr;
         capacity_ = 0;
@@ -320,7 +337,7 @@ FastMatrix<T>::~FastMatrix() {
         if (pool_) {
             pool_->deallocate(data_, rows_ * cols_ * sizeof(T));
         } else {
-            std::free(data_);
+            rfx_aligned_free(data_);
         }
     }
 }
@@ -332,7 +349,7 @@ void FastMatrix<T>::resize(size_type rows, size_type cols) {
             if (pool_) {
                 pool_->deallocate(data_, rows_ * cols_ * sizeof(T));
             } else {
-                std::free(data_);
+                rfx_aligned_free(data_);
             }
         }
         rows_ = rows;
@@ -350,7 +367,7 @@ void FastMatrix<T>::allocate(size_type size) {
     if (pool_) {
         data_ = static_cast<T*>(pool_->allocate(size * sizeof(T), alignof(T)));
     } else {
-        data_ = static_cast<T*>(std::aligned_alloc(alignof(T), size * sizeof(T)));
+        data_ = static_cast<T*>(rfx_aligned_alloc(alignof(T), size * sizeof(T)));
     }
 }
 
@@ -360,7 +377,7 @@ void FastMatrix<T>::deallocate() {
         if (pool_) {
             pool_->deallocate(data_, rows_ * cols_ * sizeof(T));
         } else {
-            std::free(data_);
+            rfx_aligned_free(data_);
         }
         data_ = nullptr;
     }

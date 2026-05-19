@@ -13,7 +13,11 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
-#include <unistd.h>  // For getpid() - fork detection
+#ifdef _WIN32
+  #include <process.h>
+#else
+  #include <unistd.h>
+#endif
 
 namespace rf {
 namespace cuda {
@@ -21,7 +25,11 @@ namespace cuda {
 // Global CUDA context management
 static bool g_cuda_initialized = false;
 static bool g_cuda_available = false;
-static pid_t g_cuda_init_pid = 0;  // Track which process initialized CUDA
+#ifdef _WIN32
+static int g_cuda_init_pid = 0;
+#else
+static pid_t g_cuda_init_pid = 0;
+#endif
 
 // Forward declaration
 void cuda_reset_device();
@@ -59,7 +67,11 @@ bool cuda_init_runtime(bool force_cpu) {
     // XGBoost-style fork detection using PID tracking
     // CUDA contexts cannot survive fork() - we must detect and reinitialize
     // This is essential for Jupyter kernels which fork from a parent process
+#ifdef _WIN32
+    int current_pid = _getpid();
+#else
     pid_t current_pid = getpid();
+#endif
     
     if (g_cuda_initialized) {
         // Check if we're in a different process (fork detected)
