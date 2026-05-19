@@ -269,49 +269,6 @@ jobs:
           path: dist/*.whl
 
   # ============================================================
-  # macOS CPU wheels (x86_64)
-  # ============================================================
-  macos-x86:
-    name: macOS x86_64 CPU - Python ${{ matrix.python-version }}
-    runs-on: macos-13
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11', '3.12', '3.13']
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install system dependencies
-        run: brew install libomp openblas lapack
-
-      - name: Install Python build tools
-        run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delocate
-
-      - name: Build CPU wheel
-        env:
-          RFX_CPU_ONLY: '1'
-          OpenMP_ROOT: /usr/local/opt/libomp
-        run: pip wheel . --no-deps -w wheelhouse/
-
-      - name: Repair wheel
-        run: |
-          mkdir -p dist/
-          for whl in wheelhouse/*.whl; do
-            delocate-wheel -v -w dist/ "$whl" || cp "$whl" dist/
-          done
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheel-macos-x86-cpu-py${{ matrix.python-version }}
-          path: dist/*.whl
-
-  # ============================================================
   # Source distribution
   # ============================================================
   sdist:
@@ -342,7 +299,7 @@ jobs:
   # ============================================================
   upload:
     name: Upload wheels
-    needs: [linux-gpu, linux-cpu, windows-gpu, windows-cpu, macos-arm, macos-x86, sdist]
+    needs: [linux-gpu, linux-cpu, windows-gpu, windows-cpu, macos-arm, sdist]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
