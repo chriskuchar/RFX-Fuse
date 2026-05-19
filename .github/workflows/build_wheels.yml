@@ -171,12 +171,13 @@ jobs:
           RFX_CUDA_STATIC: '1'
         run: pip wheel . --no-deps -w wheelhouse/
 
-      - name: Repair wheel
+      - name: Repair wheel (exclude CUDA DLLs — users must have CUDA installed)
         run: |
           New-Item -ItemType Directory -Force -Path dist
+          $cudaExclude = "cudart64_*;cublas64_*;cublasLt64_*;cusolver64_*;cusparse64_*;cufft64_*;cufftw64_*;curand64_*;nvrtc64_*;nvJitLink*;nvcuda*;nvToolsExt*;cudnn*;nvfatbin*;nvvm64_*"
           foreach ($whl in Get-ChildItem wheelhouse/*.whl) {
             try {
-              delvewheel repair $whl.FullName -w dist/
+              delvewheel repair $whl.FullName -w dist/ --no-dll $cudaExclude
             } catch {
               Copy-Item $whl.FullName dist/
             }
