@@ -155,6 +155,22 @@ jobs:
           cuda: '12.4.1'
           method: 'network'
 
+      - name: Install OpenBLAS
+        shell: pwsh
+        run: |
+          $OPENBLAS_VERSION = "0.3.28"
+          Invoke-WebRequest -Uri "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}-x64.zip" -OutFile openblas.zip
+          Expand-Archive openblas.zip -DestinationPath C:\openblas-extract
+          if (Test-Path "C:\openblas-extract\lib") {
+            $root = "C:\openblas-extract"
+          } else {
+            $root = (Get-ChildItem C:\openblas-extract -Directory | Select-Object -First 1).FullName
+          }
+          echo "OPENBLAS_DIR=$root" >> $env:GITHUB_ENV
+          echo "$root\bin" >> $env:GITHUB_PATH
+          Write-Host "OpenBLAS installed at: $root"
+          Get-ChildItem "$root\lib" | ForEach-Object { Write-Host "  lib: $($_.Name)" }
+
       - name: Install Python build tools
         run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
 
@@ -198,6 +214,22 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
+      - name: Install OpenBLAS
+        shell: pwsh
+        run: |
+          $OPENBLAS_VERSION = "0.3.28"
+          Invoke-WebRequest -Uri "https://github.com/OpenMathLib/OpenBLAS/releases/download/v${OPENBLAS_VERSION}/OpenBLAS-${OPENBLAS_VERSION}-x64.zip" -OutFile openblas.zip
+          Expand-Archive openblas.zip -DestinationPath C:\openblas-extract
+          if (Test-Path "C:\openblas-extract\lib") {
+            $root = "C:\openblas-extract"
+          } else {
+            $root = (Get-ChildItem C:\openblas-extract -Directory | Select-Object -First 1).FullName
+          }
+          echo "OPENBLAS_DIR=$root" >> $env:GITHUB_ENV
+          echo "$root\bin" >> $env:GITHUB_PATH
+          Write-Host "OpenBLAS installed at: $root"
+          Get-ChildItem "$root\lib" | ForEach-Object { Write-Host "  lib: $($_.Name)" }
 
       - name: Install Python build tools
         run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel

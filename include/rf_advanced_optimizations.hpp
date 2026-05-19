@@ -56,23 +56,37 @@ class CacheOptimizedMatrix {
 public:
     CacheOptimizedMatrix(integer_t rows, integer_t cols) 
         : rows_(rows), cols_(cols), data_(nullptr) {
-        // Align to cache line boundary
+#if defined(_MSC_VER)
+        data_ = static_cast<T*>(_aligned_malloc(rows * cols * sizeof(T), 64));
+        if (!data_) {
+            throw std::runtime_error("Failed to allocate aligned memory");
+        }
+#else
         int result = posix_memalign(reinterpret_cast<void**>(&data_), 64, 
                                    rows * cols * sizeof(T));
         if (result != 0) {
             throw std::runtime_error("Failed to allocate aligned memory");
         }
+#endif
     }
     
     ~CacheOptimizedMatrix() {
+#if defined(_MSC_VER)
+        if (data_) _aligned_free(data_);
+#else
         if (data_) free(data_);
+#endif
     }
     
     // Prefetch next cache line
     void prefetch_next(integer_t row, integer_t col) const {
-        integer_t next_idx = (row * cols_ + col + 16) & ~15; // Next cache line
+        integer_t next_idx = (row * cols_ + col + 16) & ~15;
         if (next_idx < rows_ * cols_) {
-            __builtin_prefetch(&data_[next_idx], 1, 3); // Read, high temporal locality
+#if defined(_MSC_VER)
+            _mm_prefetch(reinterpret_cast<const char*>(&data_[next_idx]), _MM_HINT_T0);
+#elif defined(__GNUC__) || defined(__clang__)
+            __builtin_prefetch(&data_[next_idx], 1, 3);
+#endif
         }
     }
     
@@ -364,6 +378,7 @@ private:
 // Advanced SIMD-optimized Gini calculation
 class SIMDEnhancedGiniCalculator {
 public:
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     // AVX-512 optimized Gini calculation
     static real_t calculate_gini_avx512(const integer_t* class_counts, 
                                        integer_t total_samples, integer_t n_classes) {
@@ -376,18 +391,14 @@ public:
         
         for (integer_t i = 0; i < n_classes; i += 16) {
             if (i + 16 <= n_classes) {
-                // Load 16 class counts
                 __m512i counts_vec = _mm512_load_si512(&class_counts[i]);
                 __m512 counts_fp = _mm512_cvtepi32_ps(counts_vec);
                 
-                // Calculate squared proportions
                 __m512 proportions = _mm512_div_ps(counts_fp, total_vec);
                 __m512 squared_proportions = _mm512_mul_ps(proportions, proportions);
                 
-                // Accumulate
                 sum_vec = _mm512_add_ps(sum_vec, squared_proportions);
             } else {
-                // Handle remaining classes
                 for (integer_t j = i; j < n_classes; ++j) {
                     real_t proportion = static_cast<real_t>(class_counts[j]) / total_samples;
                     sum_vec = _mm512_add_ps(sum_vec, _mm512_set1_ps(proportion * proportion));
@@ -396,7 +407,6 @@ public:
             }
         }
         
-        // Sum the vector elements
         real_t sum = _mm512_reduce_add_ps(sum_vec);
         return 1.0f - sum;
     }
@@ -409,18 +419,14 @@ public:
         
         for (integer_t i = 0; i < n_classes; i += 8) {
             if (i + 8 <= n_classes) {
-                // Load 8 class counts
                 __m256i counts_vec = _mm256_load_si256(reinterpret_cast<const __m256i*>(&class_counts[i]));
                 __m256 counts_fp = _mm256_cvtepi32_ps(counts_vec);
                 
-                // Calculate squared proportions
                 __m256 proportions = _mm256_div_ps(counts_fp, total_vec);
                 __m256 squared_proportions = _mm256_mul_ps(proportions, proportions);
                 
-                // Accumulate
                 sum_vec = _mm256_add_ps(sum_vec, squared_proportions);
             } else {
-                // Handle remaining classes
                 for (integer_t j = i; j < n_classes; ++j) {
                     real_t proportion = static_cast<real_t>(class_counts[j]) / total_samples;
                     sum_vec = _mm256_add_ps(sum_vec, _mm256_set1_ps(proportion * proportion));
@@ -429,7 +435,6 @@ public:
             }
         }
         
-        // Sum the vector elements
         real_t sum_array[8];
         _mm256_store_ps(sum_array, sum_vec);
         real_t sum = 0.0f;
@@ -439,6 +444,23 @@ public:
         
         return 1.0f - sum;
     }
+#else
+    // Scalar fallback for non-x86 (ARM, etc.)
+    static real_t calculate_gini_avx512(const integer_t* class_counts,
+                                       integer_t total_samples, integer_t n_classes) {
+        return calculate_gini_avx2(class_counts, total_samples, n_classes);
+    }
+
+    static real_t calculate_gini_avx2(const integer_t* class_counts,
+                                     integer_t total_samples, integer_t n_classes) {
+        real_t sum = 0.0f;
+        for (integer_t i = 0; i < n_classes; ++i) {
+            real_t proportion = static_cast<real_t>(class_counts[i]) / total_samples;
+            sum += proportion * proportion;
+        }
+        return 1.0f - sum;
+    }
+#endif
 };
 
 // ============================================================================

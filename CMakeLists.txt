@@ -195,38 +195,61 @@ else()
 endif()
 
 # Link LAPACK and BLAS explicitly (for CPU MDS computation)
-# Use find_library to locate LAPACK and BLAS
-# Try multiple library name variations and paths
-find_library(LAPACK_LIB 
-    NAMES lapack liblapack.so.3 liblapack.so libopenblas openblas
-    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
-    NO_DEFAULT_PATH
-)
-find_library(BLAS_LIB 
-    NAMES blas libblas.so.3 libblas.so libopenblas openblas
-    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
-    NO_DEFAULT_PATH
-)
-
-# If not found with NO_DEFAULT_PATH, try without it (searches more paths)
-if(NOT LAPACK_LIB)
-    find_library(LAPACK_LIB NAMES lapack liblapack.so.3 liblapack.so)
+# On Windows, check OPENBLAS_DIR env var first (set by CI workflow)
+if(WIN32 AND DEFINED ENV{OPENBLAS_DIR})
+    set(OPENBLAS_DIR "$ENV{OPENBLAS_DIR}")
+    message(STATUS "Looking for OpenBLAS in: ${OPENBLAS_DIR}")
+    find_library(OPENBLAS_LIB
+        NAMES libopenblas openblas
+        PATHS "${OPENBLAS_DIR}/lib"
+        NO_DEFAULT_PATH
+    )
+    if(OPENBLAS_LIB)
+        target_link_libraries(RFXFuse PRIVATE ${OPENBLAS_LIB})
+        target_compile_definitions(RFXFuse PRIVATE HAVE_LAPACK)
+        target_include_directories(RFXFuse PRIVATE "${OPENBLAS_DIR}/include")
+        message(STATUS "Found OpenBLAS (Windows): ${OPENBLAS_LIB}")
+        set(LAPACK_RESOLVED TRUE)
+    else()
+        file(GLOB OPENBLAS_FILES "${OPENBLAS_DIR}/lib/*")
+        message(WARNING "OPENBLAS_DIR set but library not found. Contents of ${OPENBLAS_DIR}/lib: ${OPENBLAS_FILES}")
+    endif()
 endif()
-if(NOT BLAS_LIB)
-    find_library(BLAS_LIB NAMES blas libblas.so.3 libblas.so)
-endif()
 
-if(LAPACK_LIB AND BLAS_LIB)
-    target_link_libraries(RFXFuse PRIVATE ${LAPACK_LIB} ${BLAS_LIB})
-    message(STATUS "Found LAPACK: ${LAPACK_LIB}")
-    message(STATUS "Found BLAS: ${BLAS_LIB}")
-else()
-    message(WARNING "LAPACK or BLAS not found - CPU MDS may not work")
+if(NOT LAPACK_RESOLVED)
+    find_library(LAPACK_LIB
+        NAMES lapack liblapack.so.3 liblapack.so libopenblas openblas
+        PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
+        NO_DEFAULT_PATH
+    )
+    find_library(BLAS_LIB
+        NAMES blas libblas.so.3 libblas.so libopenblas openblas
+        PATHS /usr/lib/x86_64-linux-gnu /usr/lib /lib/x86_64-linux-gnu /lib
+        NO_DEFAULT_PATH
+    )
+
     if(NOT LAPACK_LIB)
-        message(WARNING "  LAPACK_LIB not found")
+        find_library(LAPACK_LIB NAMES lapack liblapack.so.3 liblapack.so)
     endif()
     if(NOT BLAS_LIB)
-        message(WARNING "  BLAS_LIB not found")
+        find_library(BLAS_LIB NAMES blas libblas.so.3 libblas.so)
+    endif()
+
+    if(LAPACK_LIB AND BLAS_LIB)
+        target_link_libraries(RFXFuse PRIVATE ${LAPACK_LIB} ${BLAS_LIB})
+        target_compile_definitions(RFXFuse PRIVATE HAVE_LAPACK)
+        message(STATUS "Found LAPACK: ${LAPACK_LIB}")
+        message(STATUS "Found BLAS: ${BLAS_LIB}")
+    elseif(LAPACK_LIB)
+        target_link_libraries(RFXFuse PRIVATE ${LAPACK_LIB})
+        target_compile_definitions(RFXFuse PRIVATE HAVE_LAPACK)
+        message(STATUS "Found LAPACK: ${LAPACK_LIB}")
+    elseif(LAPACK_FOUND)
+        target_link_libraries(RFXFuse PRIVATE ${LAPACK_LIBRARIES})
+        target_compile_definitions(RFXFuse PRIVATE HAVE_LAPACK)
+        message(STATUS "Found LAPACK via find_package: ${LAPACK_LIBRARIES}")
+    else()
+        message(WARNING "LAPACK/BLAS not found - CPU MDS will throw at runtime")
     endif()
 endif()
 

@@ -6,11 +6,12 @@
 #include <algorithm>
 #include <iostream>
 
-// LAPACK function declarations
+#ifdef HAVE_LAPACK
 extern "C" {
     void dsyevd_(const char* jobz, const char* uplo, const int* n, double* a, const int* lda,
                  double* w, double* work, const int* lwork, int* iwork, const int* liwork, int* info);
 }
+#endif
 
 namespace rf {
 
@@ -261,14 +262,17 @@ std::vector<double> compute_mds_3d_cpu(
         }
     }
     
+#ifndef HAVE_LAPACK
+    throw std::runtime_error(
+        "CPU MDS requires LAPACK which was not available at build time. "
+        "Install OpenBLAS/LAPACK and rebuild, or use the GPU MDS backend.");
+#else
     // Step 3: Eigendecomposition using LAPACK dsyevd
-    // LAPACK expects column-major format, which is already provided
-    std::vector<double> work_matrix = centered_matrix;  // Already column-major, no transpose needed
+    std::vector<double> work_matrix = centered_matrix;
     
-    // Query workspace size
     int n_int = static_cast<int>(n);
-    char jobz = 'V'; // Compute eigenvectors
-    char uplo = 'U'; // Upper triangular
+    char jobz = 'V';
+    char uplo = 'U';
     int lwork = -1;
     int liwork = -1;
     int info = 0;
@@ -290,7 +294,6 @@ std::vector<double> compute_mds_3d_cpu(
     std::vector<double> work(lwork);
     std::vector<int> iwork(liwork);
     
-    // Compute eigendecomposition
     dsyevd_(&jobz, &uplo, &n_int, work_matrix.data(), &n_int,
             eigenvalues.data(), work.data(), &lwork, iwork.data(), &liwork, &info);
     
@@ -339,6 +342,7 @@ std::vector<double> compute_mds_3d_cpu(
     }
     
     return coords_3d;
+#endif // HAVE_LAPACK
 }
 
 } // namespace rf
