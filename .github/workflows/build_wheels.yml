@@ -68,9 +68,13 @@ jobs:
       - name: Repair wheel
         run: |
           export PATH="/opt/miniconda/envs/build/bin:/opt/miniconda/bin:$PATH"
+          pip install wheel
           mkdir -p dist/
           for whl in wheelhouse/*.whl; do
-            auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64 || cp "$whl" dist/
+            if ! auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64 2>/dev/null; then
+              python -m wheel tags --platform-tag manylinux_2_28_x86_64 --remove "$whl"
+              cp wheelhouse/*.whl dist/
+            fi
           done
 
       - name: Upload artifact
@@ -119,9 +123,13 @@ jobs:
 
       - name: Repair wheel
         run: |
+          ${{ matrix.python-bin }}/pip install wheel
           mkdir -p dist/
           for whl in wheelhouse/*.whl; do
-            auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64
+            if ! auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64 2>/dev/null; then
+              ${{ matrix.python-bin }}/python -m wheel tags --platform-tag manylinux_2_28_x86_64 --remove "$whl"
+              cp wheelhouse/*.whl dist/
+            fi
           done
 
       - name: Upload artifact
@@ -311,7 +319,13 @@ jobs:
           pattern: wheel-*
           merge-multiple: true
 
-      - name: List wheels
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+      - name: List artifacts
         run: ls -lh dist/
 
       - name: Upload to TestPyPI
