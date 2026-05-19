@@ -1,0 +1,253 @@
+name: Build Wheels
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      upload_target:
+        description: 'Upload destination'
+        required: true
+        default: 'testpypi'
+        type: choice
+        options:
+          - testpypi
+          - pypi
+          - none
+
+jobs:
+  # ============================================================
+  # Linux GPU wheels (CUDA 12.4, manylinux_2_28)
+  # ============================================================
+  linux-gpu:
+    name: Linux GPU - Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    container:
+      image: nvidia/cuda:12.4.1-devel-rockylinux8
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          yum install -y gcc gcc-c++ make wget openblas-devel lapack-devel \
+                         numactl-devel bzip2 zlib-devel libffi-devel \
+                         openssl-devel sqlite-devel
+
+      - name: Install Miniconda and Python ${{ matrix.python-version }}
+        run: |
+          wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p /opt/miniconda
+          export PATH="/opt/miniconda/bin:$PATH"
+          conda create -y -n build python=${{ matrix.python-version }}
+          echo "/opt/miniconda/envs/build/bin" >> $GITHUB_PATH
+          echo "/opt/miniconda/bin" >> $GITHUB_PATH
+
+      - name: Install Python build tools
+        run: |
+          export PATH="/opt/miniconda/envs/build/bin:/opt/miniconda/bin:$PATH"
+          pip install --upgrade pip setuptools wheel pybind11 numpy auditwheel
+
+      - name: Install CMake
+        run: |
+          export PATH="/opt/miniconda/envs/build/bin:/opt/miniconda/bin:$PATH"
+          pip install cmake
+
+      - name: Build GPU wheel
+        run: |
+          export PATH="/opt/miniconda/envs/build/bin:/opt/miniconda/bin:$PATH"
+          export RFX_CUDA_STATIC=1
+          pip wheel . --no-deps -w wheelhouse/
+
+      - name: Repair wheel
+        run: |
+          export PATH="/opt/miniconda/envs/build/bin:/opt/miniconda/bin:$PATH"
+          mkdir -p dist/
+          for whl in wheelhouse/*.whl; do
+            auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64 || cp "$whl" dist/
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-gpu-py${{ matrix.python-version }}
+          path: dist/*.whl
+
+  # ============================================================
+  # Linux CPU wheels (manylinux_2_28)
+  # ============================================================
+  linux-cpu:
+    name: Linux CPU - Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+        include:
+          - python-version: '3.11'
+            python-bin: /opt/python/cp311-cp311/bin
+          - python-version: '3.12'
+            python-bin: /opt/python/cp312-cp312/bin
+          - python-version: '3.13'
+            python-bin: /opt/python/cp313-cp313/bin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: yum install -y openblas-devel lapack-devel numactl-devel
+
+      - name: Install Python build tools
+        run: |
+          ${{ matrix.python-bin }}/pip install --upgrade pip setuptools wheel pybind11 numpy cmake
+
+      - name: Build CPU wheel
+        run: |
+          export RFX_CPU_ONLY=1
+          ${{ matrix.python-bin }}/pip wheel . --no-deps -w wheelhouse/
+
+      - name: Repair wheel
+        run: |
+          mkdir -p dist/
+          for whl in wheelhouse/*.whl; do
+            auditwheel repair "$whl" -w dist/ --plat manylinux_2_28_x86_64
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-linux-cpu-py${{ matrix.python-version }}
+          path: dist/*.whl
+
+  # ============================================================
+  # Windows GPU wheels (CUDA 12.4)
+  # ============================================================
+  windows-gpu:
+    name: Windows GPU - Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install CUDA Toolkit 12.4
+        uses: Jimver/cuda-toolkit@v0.2.21
+        id: cuda-toolkit
+        with:
+          cuda: '12.4.1'
+          method: 'network'
+
+      - name: Install Python build tools
+        run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
+
+      - name: Build GPU wheel
+        env:
+          RFX_CUDA_STATIC: '1'
+        run: pip wheel . --no-deps -w wheelhouse/
+
+      - name: Repair wheel
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          foreach ($whl in Get-ChildItem wheelhouse/*.whl) {
+            try {
+              delvewheel repair $whl.FullName -w dist/
+            } catch {
+              Copy-Item $whl.FullName dist/
+            }
+          }
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-gpu-py${{ matrix.python-version }}
+          path: dist/*.whl
+
+  # ============================================================
+  # Windows CPU wheels
+  # ============================================================
+  windows-cpu:
+    name: Windows CPU - Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python build tools
+        run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
+
+      - name: Build CPU wheel
+        env:
+          RFX_CPU_ONLY: '1'
+        run: pip wheel . --no-deps -w wheelhouse/
+
+      - name: Repair wheel
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          foreach ($whl in Get-ChildItem wheelhouse/*.whl) {
+            try {
+              delvewheel repair $whl.FullName -w dist/
+            } catch {
+              Copy-Item $whl.FullName dist/
+            }
+          }
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-windows-cpu-py${{ matrix.python-version }}
+          path: dist/*.whl
+
+  # ============================================================
+  # Upload to PyPI / TestPyPI
+  # ============================================================
+  upload:
+    name: Upload wheels
+    needs: [linux-gpu, linux-cpu, windows-gpu, windows-cpu]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Download all wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          pattern: wheel-*
+          merge-multiple: true
+
+      - name: List wheels
+        run: ls -lh dist/
+
+      - name: Upload to TestPyPI
+        if: >-
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_target == 'testpypi')
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+      - name: Upload to PyPI
+        if: >-
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_target == 'pypi')
+        uses: pypa/gh-action-pypi-publish@release/v1

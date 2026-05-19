@@ -35,8 +35,6 @@ class CMakeBuild(build_ext):
             f'-DPYTHON_EXECUTABLE={sys.executable}',
             f'-DPython3_EXECUTABLE={sys.executable}',
             f'-DPython_EXECUTABLE={sys.executable}',
-            '-DBUILD_PYTHON_BINDINGS=ON',
-            '-DCMAKE_CUDA_SEPARABLE_COMPILATION=ON',
             '-DRFX_PORTABLE=ON',
         ]
 
@@ -48,9 +46,9 @@ class CMakeBuild(build_ext):
         cmake_args.append(f'-DRFX_CUDA_STATIC={"ON" if cuda_static else "OFF"}')
 
         if not cpu_only:
-            # For wheels: target broad GPU range (Ampere 8.0+, Ada 8.9, Hopper 9.0)
-            # Also include older Pascal 6.0, Volta 7.0, Turing 7.5 for compatibility
-            cuda_archs = os.environ.get('CMAKE_CUDA_ARCHITECTURES', '60;70;75;80;86;89;90')
+            # CUDA 12.4+ supported architectures:
+            # 75 (Turing), 80 (Ampere), 86 (Ampere), 89 (Ada), 90 (Hopper)
+            cuda_archs = os.environ.get('CMAKE_CUDA_ARCHITECTURES', '75;80;86;89;90')
             cmake_args.append(f'-DCMAKE_CUDA_ARCHITECTURES={cuda_archs}')
 
         # Add pybind11 path if available
