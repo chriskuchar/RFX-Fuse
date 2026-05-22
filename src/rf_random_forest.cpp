@@ -3599,34 +3599,49 @@ void RandomForest::predict_regression(const real_t* X, integer_t nsamples, real_
 
 // Unsupervised prediction (clustering)
 void RandomForest::predict_unsupervised(const real_t* X, integer_t nsamples, integer_t* cluster_labels) {
-    // Before predict, ensure CUDA context is ready (handles context between Jupyter cells)
     if (config_.use_gpu) {
         rf::cuda::cuda_ensure_context_ready();
     }
     
-    // Implement unsupervised prediction using proximity-based clustering
-    // This is a simplified implementation - in practice, you might want to use
-    // more sophisticated clustering algorithms on the proximity matrix
-    
-    // For now, assign cluster labels based on proximity to training samples
-    // This is a basic implementation that could be enhanced
+    // Determine training data source:
+    // - Sparse unsupervised: X_train_sparse_ (dense X_train_ is empty)
+    // - Dense unsupervised: X_unsupervised_expanded_ (contains real + synthetic)
+    // - Dense classification/other: X_train_
+    bool use_sparse_train = is_sparse_ && X_train_sparse_.is_valid();
+    const real_t* train_data_ptr = nullptr;
+    if (!use_sparse_train) {
+        if (!X_unsupervised_expanded_.empty()) {
+            train_data_ptr = X_unsupervised_expanded_.data();
+        } else {
+            train_data_ptr = X_train_.data();
+        }
+    }
+
+    // For sparse mode, pre-cache training features into a dense buffer
+    // to avoid repeated sparse lookups in the inner loop
+    std::vector<real_t> sparse_train_cache;
+    if (use_sparse_train) {
+        size_t cache_size = static_cast<size_t>(config_.nsample) * static_cast<size_t>(config_.mdim);
+        sparse_train_cache.resize(cache_size, 0.0f);
+        for (integer_t r = 0; r < config_.nsample; ++r) {
+            integer_t row_start = X_train_sparse_.indptr[r];
+            integer_t row_end = X_train_sparse_.indptr[r + 1];
+            for (integer_t i = row_start; i < row_end; ++i) {
+                sparse_train_cache[static_cast<size_t>(r) * config_.mdim + X_train_sparse_.indices[i]] = X_train_sparse_.data[i];
+            }
+        }
+        train_data_ptr = sparse_train_cache.data();
+    }
     
     for (integer_t sample = 0; sample < nsamples; ++sample) {
-        // Find the training sample with highest proximity
         integer_t best_match = 0;
         real_t max_proximity = 0.0;
-        
-        // Get sample features
         const real_t* sample_features = X + sample * config_.mdim;
         
-        // Compute proximity to each training sample by traversing trees
         for (integer_t train_sample = 0; train_sample < config_.nsample; ++train_sample) {
             real_t proximity_sum = 0.0;
             
-            // For each tree, check if both samples end up in same terminal node
             for (integer_t tree_id = 0; tree_id < config_.ntree; ++tree_id) {
-                // Get pointers to this tree's storage
-                // Cast to size_t to avoid integer overflow in pointer arithmetic
                 size_t tree_offset_clust = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxnode);
                 size_t tree_treemap_offset_clust = static_cast<size_t>(tree_id) * 2 * static_cast<size_t>(config_.maxnode);
                 size_t tree_catgoleft_offset_clust = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxcat) * static_cast<size_t>(config_.maxnode);
@@ -3637,16 +3652,13 @@ void RandomForest::predict_unsupervised(const real_t* X, integer_t nsamples, int
                 integer_t* treemap = treemap_.data() + tree_treemap_offset_clust;
                 integer_t* catgoleft = catgoleft_.data() + tree_catgoleft_offset_clust;
                 
-                // Find terminal node for test sample
                 integer_t test_node = find_terminal_node(sample_features, nodestatus, bestvar, 
                                                        xbestsplit, treemap, catgoleft);
                 
-                // Find terminal node for training sample
-                const real_t* train_features = X_train_.data() + train_sample * config_.mdim;
+                const real_t* train_features = train_data_ptr + static_cast<size_t>(train_sample) * config_.mdim;
                 integer_t train_node = find_terminal_node(train_features, nodestatus, bestvar,
                                                         xbestsplit, treemap, catgoleft);
                 
-                // If both samples end up in same terminal node, add to proximity
                 if (test_node == train_node) {
                     proximity_sum += 1.0;
                 }
@@ -3659,12 +3671,10 @@ void RandomForest::predict_unsupervised(const real_t* X, integer_t nsamples, int
             }
         }
         
-        // Assign cluster label based on best match
-        // For simplicity, use the cluster label of the best matching training sample
         if (cluster_labels_.size() > best_match) {
             cluster_labels[sample] = cluster_labels_[best_match];
         } else {
-            cluster_labels[sample] = 0; // Default cluster
+            cluster_labels[sample] = 0;
         }
     }
 }

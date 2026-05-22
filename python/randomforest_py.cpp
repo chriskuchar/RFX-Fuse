@@ -1179,8 +1179,8 @@ PYBIND11_MODULE(RFXFuse, m) {
                 self.predict(static_cast<rf::real_t*>(X_buf.ptr), nsamples, pred_buf.ptr);
                 return predictions;
             } else {
-                // Unsupervised: return outlier scores
-                py::array_t<rf::real_t> predictions(nsamples);
+                // Unsupervised: return cluster labels (integer)
+                py::array_t<rf::integer_t> predictions(nsamples);
                 auto pred_buf = predictions.request();
                 self.predict(static_cast<rf::real_t*>(X_buf.ptr), nsamples, pred_buf.ptr);
                 return predictions;
@@ -6778,7 +6778,7 @@ fig.update_scenes(
     // circular import crashes in Jupyter notebooks. See the py::exec section.
 
     // Version info
-    m.attr("__version__") = "1.1.1";
+    m.attr("__version__") = "1.1.2";
 #ifdef CUDA_FOUND
     m.attr("__cuda_enabled__") = true;
 #else
