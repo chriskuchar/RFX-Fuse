@@ -4051,7 +4051,7 @@ PYBIND11_MODULE(RFXFuse, m) {
                                 int ncsplit = 25,
                                 int ncmax = 25,
                                 int iseed = 12345,
-                               bool compute_proximity = true,  // Proximity is the main output for unsupervised
+                               bool compute_proximity = false,  // Proximity matrix is expensive; use leaf_assignments + top_k_similar instead
                                bool compute_importance = true,  // With synthetic data, importance is meaningful for unsupervised!
                                bool compute_local_importance = false,  // Per-sample importance
                                 bool use_gpu = false,
@@ -6778,7 +6778,7 @@ fig.update_scenes(
     // circular import crashes in Jupyter notebooks. See the py::exec section.
 
     // Version info
-    m.attr("__version__") = "1.1.0";
+    m.attr("__version__") = "1.1.1";
 #ifdef CUDA_FOUND
     m.attr("__cuda_enabled__") = true;
 #else

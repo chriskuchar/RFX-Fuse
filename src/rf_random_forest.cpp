@@ -410,9 +410,7 @@ void RandomForest::initialize_arrays() {
         bool use_upper_triangle = true;  // Default to true for memory efficiency
         
         if (!(use_lowrank && use_upper_triangle)) {
-            // For unsupervised, proximity only covers real samples
-            integer_t prox_dim = (config_.n_real_samples > 0) ? config_.n_real_samples : config_.nsample;
-            proximity_matrix_.assign(static_cast<size_t>(prox_dim) * prox_dim, 0.0);
+            proximity_matrix_.assign(static_cast<size_t>(config_.nsample) * config_.nsample, 0.0);
         }
         // For low-rank mode, proximity_matrix_ will be allocated later in GPU code
     }
