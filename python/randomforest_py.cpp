@@ -6778,7 +6778,7 @@ fig.update_scenes(
     // circular import crashes in Jupyter notebooks. See the py::exec section.
 
     // Version info
-    m.attr("__version__") = "1.1.2";
+    m.attr("__version__") = "1.1.3";
 #ifdef CUDA_FOUND
     m.attr("__cuda_enabled__") = true;
 #else

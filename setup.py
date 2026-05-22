@@ -65,6 +65,16 @@ class CMakeBuild(build_ext):
 
         cmake_args += [f'-DCMAKE_BUILD_TYPE={cfg}']
 
+        # On Windows with Visual Studio generators, CMake appends Release/ or
+        # Debug/ to output directories. Set per-config variables to prevent this.
+        # .pyd files are DLLs, so RUNTIME_OUTPUT_DIRECTORY is needed on Windows.
+        if sys.platform == 'win32':
+            cmake_args += [
+                f'-DCMAKE_LIBRARY_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}',
+                f'-DCMAKE_RUNTIME_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}',
+                f'-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_{cfg.upper()}={extdir}',
+            ]
+
         import multiprocessing
         num_cores = multiprocessing.cpu_count()
         if sys.platform == 'win32':
@@ -131,7 +141,7 @@ elif os.path.exists('README.md'):
 
 setup(
     name=pkg_name,
-    version='1.1.2',
+    version='1.1.3',
     author='Chris Kuchar',
     author_email='chrisjkuchar@gmail.com',
     description=pkg_description,
