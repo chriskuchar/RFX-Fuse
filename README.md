@@ -2,9 +2,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PyPI](https://img.shields.io/pypi/v/rfx-fuse.svg)](https://pypi.org/project/rfx-fuse/)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![PyPI CPU](https://img.shields.io/pypi/v/rfx-fuse-cpu.svg?label=pypi%20cpu)](https://pypi.org/project/rfx-fuse-cpu/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![C++17](https://img.shields.io/badge/C++-17-00599C.svg?logo=cplusplus)](https://en.cppreference.com/w/cpp/17)
-[![CUDA](https://img.shields.io/badge/CUDA-12.8-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-toolkit)
+[![CUDA](https://img.shields.io/badge/CUDA-12.4-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-toolkit)
 [![arXiv](https://img.shields.io/badge/arXiv-2603.13234-b31b1b.svg)](https://arxiv.org/html/2603.13234v1)
 
 **RFX-Fuse** (Random Forests X [X=compression] — Forest Unified Learning and Similarity Engine) delivers Breiman and Cutler's complete vision for Random Forests as a Forests Unified Machine Learning and Similarity Engine with native GPU/CPU support.
@@ -52,19 +53,33 @@ These capabilities enable it to be a unified learning and similarity engine. Wit
 
 ## Installation
 
-### From PyPI (GPU)
+### Pre-built Wheels (Recommended)
+
+Pre-built binary wheels are available on PyPI for Python 3.11, 3.12, and 3.13. No compiler, CMake, or CUDA toolkit needed for CPU builds.
+
+#### GPU (requires CUDA 12.4+ toolkit installed on your system)
 
 ```bash
 pip install rfx-fuse
 ```
 
-### From PyPI (CPU-only, no build tools required)
+#### CPU-only
 
 ```bash
 pip install rfx-fuse-cpu
 ```
 
-Pre-built binary wheel -- no CMake, compiler, or CUDA needed.
+#### Available Wheels
+
+| Package | Platform | Python | Architecture |
+|---------|----------|--------|-------------|
+| `rfx-fuse` | Linux | 3.11, 3.12, 3.13 | x86_64 (CUDA 12.4) |
+| `rfx-fuse` | Windows | 3.11, 3.12, 3.13 | x86_64 (CUDA 12.4) |
+| `rfx-fuse-cpu` | Linux | 3.11, 3.12, 3.13 | x86_64 |
+| `rfx-fuse-cpu` | Windows | 3.11, 3.12, 3.13 | x86_64 |
+| `rfx-fuse-cpu` | macOS | 3.11, 3.12, 3.13 | Apple Silicon (ARM) |
+
+> **Note:** GPU wheels require the [CUDA Toolkit 12.4+](https://developer.nvidia.com/cuda-downloads) to be installed on your system. CPU wheels have no external dependencies beyond Python and NumPy.
 
 ### From Source (GPU)
 
@@ -82,13 +97,13 @@ cd RFX-Fuse
 RFX_CPU_ONLY=1 pip install -e .
 ```
 
-### Prerequisites
+### Prerequisites (source builds only)
 
 - **Python** 3.9+
-- **CMake** 3.12+ (source builds only)
-- **C++ compiler** with C++17 support (GCC 7+, Clang 5+) (source builds only)
+- **CMake** 3.18+
+- **C++ compiler** with C++17 support (GCC 7+, Clang 5+, MSVC 2019+)
 - **OpenMP** (usually included with compiler)
-- **CUDA toolkit** 12.8+ (GPU acceleration only)
+- **CUDA toolkit** 12.4+ (GPU builds only)
 
 ### Verify Installation
 
