@@ -83,15 +83,26 @@ py::object ensure_csr(py::object sparse_matrix) {
 // Standalone wrapper function for fit to avoid lambda capture issues in exec() context
 // This function must return cleanly to avoid memcpy crashes in exec() context
 void fit_wrapper(rf::RandomForest& self,
-                 py::array_t<rf::real_t> X,
-                 py::array y,
+                 py::array X_raw,
+                 py::array y_raw,
                  py::array_t<rf::real_t> sample_weights) {
     // Wrap entire function in try-catch to ensure clean return
     // This prevents any exceptions from causing stack corruption during return
     try {
-    // CRITICAL: Ensure X is C-contiguous (row-major) before accessing data
-    // NumPy arrays may be Fortran-contiguous (column-major) which would cause data corruption
-    py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contiguous = X;
+    // Auto-convert X to float32 C-contiguous to prevent silent data corruption
+    py::module_ np = py::module_::import("numpy");
+    py::object X_obj = np.attr("ascontiguousarray")(X_raw, py::arg("dtype") = np.attr("float32"));
+    py::array_t<rf::real_t, py::array::c_style> X_contiguous(X_obj);
+
+    // Auto-convert y: int32 for classification, float32 for regression
+    py::array y;
+    if (self.get_task_type() == rf::TaskType::CLASSIFICATION) {
+        py::object y_obj = np.attr("ascontiguousarray")(y_raw, py::arg("dtype") = np.attr("int32"));
+        y = py::array(y_obj);
+    } else {
+        py::object y_obj = np.attr("ascontiguousarray")(y_raw, py::arg("dtype") = np.attr("float32"));
+        y = py::array(y_obj);
+    }
     
     // Check dimensions
     auto X_buf = X_contiguous.request();
@@ -484,23 +495,22 @@ PYBIND11_MODULE(RFXFuse, m) {
             return importances;
         }
 
-        py::object predict(py::array_t<rf::real_t> X) {
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        py::object predict(py::array X_in) {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             rf::integer_t nsamples = static_cast<rf::integer_t>(X_buf.shape[0]);
 
-            // Auto-detect task type and call appropriate predict function
             rf::TaskType task_type = rf_->get_task_type();
 
             if (task_type == rf::TaskType::REGRESSION) {
-                // Regression: return float predictions
                 py::array_t<rf::real_t> predictions(nsamples);
                 auto pred_buf = predictions.request();
                 rf_->predict_regression(static_cast<rf::real_t*>(X_buf.ptr), nsamples,
                                        static_cast<rf::real_t*>(pred_buf.ptr));
                 return predictions;
             } else {
-                // Classification or Unsupervised: return integer labels
                 py::array_t<rf::integer_t> predictions(nsamples);
                 auto pred_buf = predictions.request();
                 rf_->predict(static_cast<rf::real_t*>(X_buf.ptr), nsamples,
@@ -509,8 +519,10 @@ PYBIND11_MODULE(RFXFuse, m) {
             }
         }
 
-        py::array_t<rf::real_t> predict_regression(py::array_t<rf::real_t> X) {
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        py::array_t<rf::real_t> predict_regression(py::array X_in) {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             rf::integer_t nsamples = static_cast<rf::integer_t>(X_buf.shape[0]);
 
@@ -523,8 +535,10 @@ PYBIND11_MODULE(RFXFuse, m) {
             return predictions;
         }
 
-        py::array_t<rf::real_t> predict_proba(py::array_t<rf::real_t> X) {
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        py::array_t<rf::real_t> predict_proba(py::array X_in) {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             rf::integer_t nsamples = static_cast<rf::integer_t>(X_buf.shape[0]);
             rf::integer_t nclasses = rf_->get_n_classes();
@@ -928,7 +942,12 @@ PYBIND11_MODULE(RFXFuse, m) {
         RandomForestWrapper(const rf::RandomForestConfig& config) 
             : config_(config), initialized_(false) {}
         
-        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
+        void fit(py::array X_raw, py::array y_raw, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
+            // Auto-convert inputs to correct dtypes
+            py::module_ np = py::module_::import("numpy");
+            py::array_t<rf::real_t> X(np.attr("ascontiguousarray")(X_raw, py::arg("dtype") = np.attr("float32")));
+            py::array y(np.attr("ascontiguousarray")(y_raw, py::arg("dtype") = np.attr("int32")));
+
             // Initialize RandomForest lazily when fit is called
             if (!initialized_) {
                 try {
@@ -1031,12 +1050,14 @@ PYBIND11_MODULE(RFXFuse, m) {
             }
         }
         
-        py::array_t<rf::real_t> predict(py::array_t<rf::real_t> X) {
+        py::array_t<rf::real_t> predict(py::array X_in) {
             if (!initialized_) {
                 throw std::runtime_error("Model must be fitted before prediction");
             }
             
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             rf::integer_t nsamples = X_buf.shape[0];
             
@@ -1141,9 +1162,10 @@ PYBIND11_MODULE(RFXFuse, m) {
              "Fit the random forest model using sparse matrix input (scipy.sparse.csr_matrix)")
 
         .def("predict", [](rf::RandomForest& self,
-                          py::array_t<rf::real_t> X) -> py::object {
-            // Ensure C-contiguous array
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+                          py::array X_in) -> py::object {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             
             if (X_buf.ndim != 2) {
@@ -1334,11 +1356,19 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
-            // Ensure C-contiguous array
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        void fit(py::array X_in, py::array y_in, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
+            // Auto-convert X to float32 C-contiguous -- silently handles float64, int, etc.
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
+
+            // Auto-convert y to int32 -- critical: passing int64/float64 causes silent data corruption
+            py::object y_converted = np.attr("ascontiguousarray")(y_in, py::arg("dtype") = np.attr("int32"));
+            py::array_t<rf::integer_t> y_safe(y_converted);
+            py::array y(y_safe);
             auto y_buf = y.request();
+
             auto sample_weights_buf = sample_weights.request();
             
             if (X_buf.ndim != 2) {
@@ -1756,18 +1786,22 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
         
         // Delegate all other methods to the underlying RandomForest
-        py::array_t<rf::integer_t> predict(py::array_t<rf::real_t> X) {
+        py::array_t<rf::integer_t> predict(py::array X_in) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict()");
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             py::array_t<rf::integer_t> predictions(X_buf.shape[0]);
             rf_->predict(static_cast<rf::real_t*>(X_buf.ptr), X_buf.shape[0], predictions.mutable_data());
             return predictions;
         }
         
-        py::array_t<rf::real_t> predict_proba(py::array_t<rf::real_t> X) {
+        py::array_t<rf::real_t> predict_proba(py::array X_in) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_proba()");
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             py::array_t<rf::real_t> probabilities({X_buf.shape[0], static_cast<py::ssize_t>(rf_->get_n_classes())});
             rf_->predict_proba(static_cast<rf::real_t*>(X_buf.ptr), X_buf.shape[0], probabilities.mutable_data());
@@ -2336,10 +2370,12 @@ PYBIND11_MODULE(RFXFuse, m) {
         // ====================================================================
         
         // Predict leaf assignments for new samples (dense input)
-        py::array_t<int16_t> predict_leaf_assignments(py::array_t<rf::real_t> X_new) {
+        py::array_t<int16_t> predict_leaf_assignments(py::array X_in) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_leaf_assignments()");
             
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional");
@@ -2386,10 +2422,9 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
         
         // Predict top-K similar training samples for new data
-        py::tuple predict_top_k_similar(py::array_t<rf::real_t> X_new, int k = 10) {
+        py::tuple predict_top_k_similar(py::array X_in, int k = 10) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar()");
             
-            // Ensure inverted index is built for fast lookups
             if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
                 rf_->build_inverted_leaf_index();
             }
@@ -2399,7 +2434,9 @@ PYBIND11_MODULE(RFXFuse, m) {
                 throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
             }
             
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional");
@@ -2843,11 +2880,16 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> y, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
-            // CRITICAL: Ensure X is C-contiguous (row-major) before accessing data
-            // NumPy arrays may be Fortran-contiguous (column-major) which would cause data corruption
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contiguous = X;
-            
+        void fit(py::array X_in, py::array y_in, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
+            // Auto-convert X to float32 C-contiguous
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contiguous(X_converted);
+
+            // Auto-convert y to float32 for regression
+            py::object y_converted = np.attr("ascontiguousarray")(y_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t> y(y_converted);
+
             // Extract data dimensions from actual data
             auto X_buf = X_contiguous.request();
             auto y_buf = y.request();
@@ -3175,9 +3217,10 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
         
         // Delegate all other methods to the underlying RandomForest
-        py::array_t<rf::real_t> predict(py::array_t<rf::real_t> X) {
-            // Ensure C-contiguous (row-major) array
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        py::array_t<rf::real_t> predict(py::array X_in) {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             py::array_t<rf::real_t> predictions(X_buf.shape[0]);
             rf_->predict_regression(static_cast<rf::real_t*>(X_buf.ptr), X_buf.shape[0], predictions.mutable_data());
@@ -3584,10 +3627,12 @@ PYBIND11_MODULE(RFXFuse, m) {
         // ====================================================================
 
         // Predict leaf assignments for new samples (dense input)
-        py::array_t<int16_t> predict_leaf_assignments(py::array_t<rf::real_t> X_new) {
+        py::array_t<int16_t> predict_leaf_assignments(py::array X_in) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_leaf_assignments()");
 
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional");
@@ -3609,7 +3654,7 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
 
         // Predict top-K similar training samples for new data
-        py::tuple predict_top_k_similar(py::array_t<rf::real_t> X_new, int k = 10) {
+        py::tuple predict_top_k_similar(py::array X_in, int k = 10) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar()");
 
             if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
@@ -3621,7 +3666,9 @@ PYBIND11_MODULE(RFXFuse, m) {
                 throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
             }
 
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X_new);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             if (X_buf.ndim != 2) {
                 throw std::runtime_error("X must be 2-dimensional");
@@ -4181,10 +4228,11 @@ PYBIND11_MODULE(RFXFuse, m) {
             config_.use_sparse = use_sparse;
         }
         
-        void fit(py::array_t<rf::real_t> X, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
-            // CRITICAL: Ensure X is C-contiguous (row-major) before accessing data
-            // NumPy arrays may be Fortran-contiguous (column-major) which would cause data corruption
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contiguous = X;
+        void fit(py::array X_in, py::array_t<rf::real_t> sample_weights = py::array_t<rf::real_t>()) {
+            // Auto-convert X to float32 C-contiguous
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contiguous(X_converted);
             
             // Extract data dimensions from actual data
             auto X_buf = X_contiguous.request();
@@ -4539,8 +4587,10 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
         
         // Delegate all other methods to the underlying RandomForest
-        py::array_t<rf::integer_t> predict(py::array_t<rf::real_t> X) {
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+        py::array_t<rf::integer_t> predict(py::array X_in) {
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
             py::array_t<rf::integer_t> predictions(X_buf.shape[0]);
             rf_->predict(static_cast<rf::real_t*>(X_buf.ptr), X_buf.shape[0], predictions.mutable_data());
@@ -4548,12 +4598,12 @@ PYBIND11_MODULE(RFXFuse, m) {
         }
         
         // Predict class probabilities (P(real), P(synthetic)) for unsupervised mode
-        // This is useful for imputation validation and anomaly detection
-        py::array_t<rf::real_t> predict_proba(py::array_t<rf::real_t> X) {
+        py::array_t<rf::real_t> predict_proba(py::array X_in) {
             if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_proba()");
-            py::array_t<rf::real_t, py::array::c_style | py::array::forcecast> X_contig(X);
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
             auto X_buf = X_contig.request();
-            // Unsupervised mode has 2 classes: 0=synthetic, 1=real
             py::array_t<rf::real_t> probabilities({X_buf.shape[0], static_cast<py::ssize_t>(rf_->get_n_classes())});
             rf_->predict_proba(static_cast<rf::real_t*>(X_buf.ptr), X_buf.shape[0], probabilities.mutable_data());
             return probabilities;
@@ -5296,12 +5346,16 @@ PYBIND11_MODULE(RFXFuse, m) {
         }, "Explicitly clean up GPU memory. Safe to call multiple times. Useful for Jupyter notebook memory management.");
 
     // rfviz visualization function binding - generates 2x2 grid HTML with linked brushing JavaScript
-    m.def("rfviz", [](py::object rf_model, py::array_t<rf::real_t> X, py::array_t<rf::real_t> y,
+    m.def("rfviz", [](py::object rf_model, py::array X_in, py::array y_in,
                       py::object feature_names = py::none(), py::object n_clusters = py::cast(3),
                       py::object title = py::none(), py::object output_file = py::cast("rfviz.html"),
                       py::object show_in_browser = py::cast(true), py::object save_html = py::cast(true),
                       int mds_k = 3) -> py::object {
-        // Use Python exec to generate 2x2 grid, then inject JavaScript
+        // Auto-convert to float32
+        py::module_ np = py::module_::import("numpy");
+        py::array_t<rf::real_t> X(np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32")));
+        py::array_t<rf::real_t> y(np.attr("ascontiguousarray")(y_in, py::arg("dtype") = np.attr("float32")));
+
         try {
             py::object locals = py::dict();
             locals["rf_model"] = rf_model;
@@ -7065,6 +7119,22 @@ except Exception as e:
     }
     
     // ============================================================================
+    // METRICS FUNCTIONS - imported from rfx_metrics.py so they're accessible
+    // via: import RFXFuse as rfx; rfx.tune_threshold(...), rfx.evaluate_classifier(...)
+    // ============================================================================
+    try {
+        py::module_ metrics_mod = py::module_::import("rfx_metrics");
+        m.attr("tune_threshold") = metrics_mod.attr("tune_threshold");
+        m.attr("evaluate_classifier") = metrics_mod.attr("evaluate_classifier");
+        m.attr("compare_classifiers") = metrics_mod.attr("compare_classifiers");
+        m.attr("bootstrap_ci") = metrics_mod.attr("bootstrap_ci");
+        m.attr("ThresholdResult") = metrics_mod.attr("ThresholdResult");
+        m.attr("ClassifierEvaluation") = metrics_mod.attr("ClassifierEvaluation");
+    } catch (...) {
+        // rfx_metrics.py not available - metrics functions won't be on module
+    }
+
+    // ============================================================================
     // IMPUTATION FUNCTIONS - imported from rfx_impute.py so they're accessible
     // via: import RFXFuse as rfx; rfx.rfx_impute_rough(...)
     // ============================================================================
@@ -7079,6 +7149,7 @@ except Exception as e:
         m.attr("impute_knn_mean") = impute_mod.attr("rfx_impute_knn_mean");
         m.attr("impute_knn_median") = impute_mod.attr("rfx_impute_knn_median");
         m.attr("Imputer") = impute_mod.attr("Imputer");
+        m.attr("decode_imputed") = impute_mod.attr("decode_imputed");
     } catch (...) {
         // rfx_impute.py not available - imputation functions won't be on module
     }
