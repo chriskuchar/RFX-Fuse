@@ -501,6 +501,7 @@ void RandomForest::set_categorical_features(const integer_t* cat_array, integer_
 void RandomForest::fit(const real_t* X, const void* y, const real_t* sample_weights) {
     // Set global config values that CPU/GPU code needs
     rf::g_config.use_casewise = config_.use_casewise;
+    rf::g_config.classwt = config_.classwt;
 
     switch (config_.task_type) {
         case TaskType::CLASSIFICATION:
@@ -986,6 +987,7 @@ void RandomForest::fit_regression(const real_t* X, const real_t* y, const real_t
 void RandomForest::fit_unsupervised(const real_t* X, const real_t* sample_weights_unused) {
     // Set global config values that CPU/GPU code needs
     rf::g_config.use_casewise = config_.use_casewise;
+    rf::g_config.classwt = config_.classwt;
     
     // Training message handled by Python wrapper
     // std::cout << "Training Random Forest Unsupervised with " << config_.ntree << " trees...\n";
@@ -1497,11 +1499,6 @@ void RandomForest::grow_tree_single(integer_t tree_id, integer_t seed) {
             if (config_.task_type == TaskType::CLASSIFICATION || config_.task_type == TaskType::UNSUPERVISED) {
                 // For classification/unsupervised: accumulate class votes in q_ array
             if (jtr_workspace_[n] >= 0 && jtr_workspace_[n] < config_.nclass) {
-                // Use 0-based indexing directly
-                // q_ array is indexed as [sample * nclass + class]
-                // Casewise vs non-casewise weighting for OOB votes
-                // Non-casewise: weight = 1.0 (UC Berkeley standard)
-                // Casewise: weight = tnodewt[terminal_node] (bootstrap frequency weighted)
                 real_t vote_weight = 1.0f;
                 if (config_.use_casewise) {
                     integer_t terminal_node = nodextr_workspace_[n];
@@ -1509,7 +1506,10 @@ void RandomForest::grow_tree_single(integer_t tree_id, integer_t seed) {
                         vote_weight = tnodewt[terminal_node];
                     }
                 }
-                // Cast to size_t to avoid integer overflow in index calculation
+                // Breiman class prior weighting: multiply vote by classwt (classification only)
+                if (config_.task_type == TaskType::CLASSIFICATION && !config_.classwt.empty()) {
+                    vote_weight *= config_.classwt[jtr_workspace_[n]];
+                }
                 size_t class_idx = static_cast<size_t>(n) * static_cast<size_t>(config_.nclass) + static_cast<size_t>(jtr_workspace_[n]);
                 if (class_idx < q_.size()) {
                     q_[class_idx] += vote_weight;
@@ -3400,19 +3400,16 @@ void RandomForest::predict_classification(const real_t* X, integer_t nsamples, i
         }
     } else {
         // Use tree traversal for new/held-out data
-        std::vector<integer_t> votes(config_.nclass, 0);
+        // Use real_t votes to support fractional class weights
+        const bool use_classwt = (config_.task_type == TaskType::CLASSIFICATION && !config_.classwt.empty());
+        std::vector<real_t> votes(config_.nclass, 0.0f);
         
         for (integer_t sample = 0; sample < nsamples; ++sample) {
-            // Reset votes for this sample
-            std::fill(votes.begin(), votes.end(), 0);
+            std::fill(votes.begin(), votes.end(), 0.0f);
             
-            // Get sample features
             const real_t* sample_features = X + sample * config_.mdim;
             
-            // Vote from each tree
             for (integer_t tree_id = 0; tree_id < config_.ntree; ++tree_id) {
-                // Get pointers to this tree's storage
-                // Cast to size_t to avoid integer overflow in pointer arithmetic
                 size_t tree_offset_pred = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxnode);
                 size_t tree_treemap_offset_pred = static_cast<size_t>(tree_id) * 2 * static_cast<size_t>(config_.maxnode);
                 size_t tree_catgoleft_offset_pred = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxcat) * static_cast<size_t>(config_.maxnode);
@@ -3424,68 +3421,57 @@ void RandomForest::predict_classification(const real_t* X, integer_t nsamples, i
                 integer_t* nodeclass = nodeclass_.data() + tree_offset_pred;
                 integer_t* catgoleft = catgoleft_.data() + tree_catgoleft_offset_pred;
                 
-                // Traverse tree starting from root (node 0) - EXACT match to testreebag.f90
-                integer_t kt = 0; // Current node index (0-based, matching Fortran kt=1 converted to 0-based)
+                integer_t kt = 0;
                 
-                // Loop through all possible nodes (matching original algorithm exactly)
                 for (integer_t k = 0; k < config_.maxnode; ++k) {
                     if (kt >= config_.maxnode) {
-                        // Safety check - node index out of bounds
-                        votes[0]++; // Default to class 0
+                        votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         break;
                     }
                     
                     if (nodestatus[kt] == -1) {
-                        // Terminal node - get class prediction (matching testreebag.f90 line 29)
                         integer_t predicted_class = nodeclass[kt];
                         if (predicted_class >= 0 && predicted_class < config_.nclass) {
-                            votes[predicted_class]++; // Use 0-based indexing directly
+                            votes[predicted_class] += use_classwt ? config_.classwt[predicted_class] : 1.0f;
                         } else {
-                            votes[0]++; // Default to class 0 for invalid predictions
+                            votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         }
                         break;
                     }
                     
-                    // Split node - traverse based on split (matching testreebag.f90 lines 33-48)
-                    integer_t m = bestvar[kt]; // Split variable
+                    integer_t m = bestvar[kt];
                     
                     if (m >= 0 && m < config_.mdim) {
                         real_t feature_value = sample_features[m];
                         
-                        // Check if variable is quantitative (cat == 1) or categorical
                         if (cat_[m] == 1) {
-                            // Quantitative variable (matching testreebag.f90 lines 35-40)
                             if (feature_value <= xbestsplit[kt]) {
-                                kt = treemap[kt * 2]; // Left child (0-based indexing)
+                                kt = treemap[kt * 2];
                             } else {
-                                kt = treemap[kt * 2 + 1]; // Right child (0-based indexing)
+                                kt = treemap[kt * 2 + 1];
                             }
                         } else {
-                            // Categorical variable (matching testreebag.f90 lines 42-47)
-                            integer_t jcat = static_cast<integer_t>(feature_value + 0.5); // Round to nearest integer
+                            integer_t jcat = static_cast<integer_t>(feature_value + 0.5);
                             if (jcat >= 0 && jcat < cat_[m]) {
                                 if (catgoleft[(kt * config_.maxcat) + jcat] == 1) {
-                                    kt = treemap[kt * 2]; // Left child (0-based indexing)
+                                    kt = treemap[kt * 2];
                                 } else {
-                                    kt = treemap[kt * 2 + 1]; // Right child (0-based indexing)
+                                    kt = treemap[kt * 2 + 1];
                                 }
                             } else {
-                                // Invalid category - default to class 0
-                                votes[0]++;
+                                votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                                 break;
                             }
                         }
                     } else {
-                        // Invalid split variable - default to class 0
-                        votes[0]++;
+                        votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         break;
                     }
                 }
             }
             
-            // Find class with most votes (matching predict.f lines 15-28)
             integer_t predicted_class = 0;
-            integer_t max_votes = votes[0];
+            real_t max_votes = votes[0];
             for (integer_t c = 1; c < config_.nclass; ++c) {
                 if (votes[c] > max_votes) {
                     max_votes = votes[c];
@@ -3874,20 +3860,15 @@ void RandomForest::predict_proba(const real_t* X, integer_t nsamples, real_t* pr
             }
         }
     } else {
-        // Use tree traversal for new/held-out data
-        std::vector<integer_t> votes(config_.nclass, 0);
+        const bool use_classwt = (config_.task_type == TaskType::CLASSIFICATION && !config_.classwt.empty());
+        std::vector<real_t> votes(config_.nclass, 0.0f);
         
         for (integer_t sample = 0; sample < nsamples; ++sample) {
-            // Reset votes for this sample
-            std::fill(votes.begin(), votes.end(), 0);
+            std::fill(votes.begin(), votes.end(), 0.0f);
             
-            // Get sample features
             const real_t* sample_features = X + sample * config_.mdim;
             
-            // Vote from each tree
             for (integer_t tree_id = 0; tree_id < config_.ntree; ++tree_id) {
-                // Get pointers to this tree's storage
-                // Cast to size_t to avoid integer overflow in pointer arithmetic
                 size_t tree_offset_pred = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxnode);
                 size_t tree_treemap_offset_pred = static_cast<size_t>(tree_id) * 2 * static_cast<size_t>(config_.maxnode);
                 size_t tree_catgoleft_offset_pred = static_cast<size_t>(tree_id) * static_cast<size_t>(config_.maxcat) * static_cast<size_t>(config_.maxnode);
@@ -3899,71 +3880,64 @@ void RandomForest::predict_proba(const real_t* X, integer_t nsamples, real_t* pr
                 integer_t* nodeclass = nodeclass_.data() + tree_offset_pred;
                 integer_t* catgoleft = catgoleft_.data() + tree_catgoleft_offset_pred;
                 
-                // Traverse tree starting from root (node 0) - EXACT match to testreebag.f90
-                integer_t kt = 0; // Current node index (0-based, matching Fortran kt=1 converted to 0-based)
+                integer_t kt = 0;
                 
-                // Loop through all possible nodes (matching original algorithm exactly)
                 for (integer_t k = 0; k < config_.maxnode; ++k) {
                     if (kt >= config_.maxnode) {
-                        // Safety check - node index out of bounds
-                        votes[0]++; // Default to class 0
+                        votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         break;
                     }
                     
                     if (nodestatus[kt] == -1) {
-                        // Terminal node - get class prediction (matching testreebag.f90 line 29)
                         integer_t predicted_class = nodeclass[kt];
                         if (predicted_class >= 0 && predicted_class < config_.nclass) {
-                            votes[predicted_class]++; // Use 0-based indexing directly
+                            votes[predicted_class] += use_classwt ? config_.classwt[predicted_class] : 1.0f;
                         } else {
-                            votes[0]++; // Default to class 0 for invalid predictions
+                            votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         }
                         break;
                     }
                     
-                    // Split node - traverse based on split (matching testreebag.f90 lines 33-48)
-                    integer_t m = bestvar[kt]; // Split variable
+                    integer_t m = bestvar[kt];
                     
                     if (m >= 0 && m < config_.mdim) {
                         real_t feature_value = sample_features[m];
                         
-                        // Check if variable is quantitative (cat == 1) or categorical
                         if (cat_[m] == 1) {
-                            // Quantitative variable (matching testreebag.f90 lines 35-40)
                             if (feature_value <= xbestsplit[kt]) {
-                                kt = treemap[kt * 2]; // Left child (0-based indexing)
+                                kt = treemap[kt * 2];
                             } else {
-                                kt = treemap[kt * 2 + 1]; // Right child (0-based indexing)
+                                kt = treemap[kt * 2 + 1];
                             }
                         } else {
-                            // Categorical variable (matching testreebag.f90 lines 42-47)
-                            integer_t jcat = static_cast<integer_t>(feature_value + 0.5); // Round to nearest integer
+                            integer_t jcat = static_cast<integer_t>(feature_value + 0.5);
                             if (jcat >= 0 && jcat < cat_[m]) {
                                 if (catgoleft[(kt * config_.maxcat) + jcat] == 1) {
-                                    kt = treemap[kt * 2]; // Left child (0-based indexing)
+                                    kt = treemap[kt * 2];
                                 } else {
-                                    kt = treemap[kt * 2 + 1]; // Right child (0-based indexing)
+                                    kt = treemap[kt * 2 + 1];
                                 }
                             } else {
-                                // Invalid category - default to class 0
-                                votes[0]++;
+                                votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                                 break;
                             }
                         }
                     } else {
-                        // Invalid split variable - default to class 0
-                        votes[0]++;
+                        votes[0] += use_classwt ? config_.classwt[0] : 1.0f;
                         break;
                     }
                 }
             }
             
-            // Convert votes to probabilities (matching predict.f logic)
-            real_t total_votes = static_cast<real_t>(config_.ntree);
+            // Convert weighted votes to probabilities (normalize to sum to 1.0)
+            real_t total_votes = 0.0f;
             for (integer_t c = 0; c < config_.nclass; ++c) {
-                // Cast to size_t to avoid integer overflow in index calculation
+                total_votes += votes[c];
+            }
+            if (total_votes <= 0.0f) total_votes = 1.0f;
+            for (integer_t c = 0; c < config_.nclass; ++c) {
                 size_t prob_idx = static_cast<size_t>(sample) * static_cast<size_t>(config_.nclass) + static_cast<size_t>(c);
-                probabilities[prob_idx] = static_cast<real_t>(votes[c]) / total_votes;
+                probabilities[prob_idx] = votes[c] / total_votes;
             }
         }
     }

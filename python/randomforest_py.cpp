@@ -1220,6 +1220,8 @@ PYBIND11_MODULE(RFXFuse, m) {
         int last_progress_refresh_pos_;  // Track last refresh position for throttling
         std::string gpu_loss_function_str_;  // Store original loss function string for re-validation
         py::object categorical_features_;  // User-specified categorical feature indices (list or None)
+        std::string class_weight_;  // "balanced" or "" (empty = uniform)
+        py::object classwt_obj_;  // User-provided per-class weight vector or None
         
     public:
         // Getter for internal RF pointer (needed for lambda bindings)
@@ -1260,7 +1262,11 @@ PYBIND11_MODULE(RFXFuse, m) {
                                 bool compute_leaf_assignments = false,  // Store terminal node per sample per tree for on-demand proximity. Memory: ntree*nsample*2 bytes.
                                 py::object categorical_features = py::none(),  // List of column indices (0-based) for categorical features, or None for auto-detection
                                 bool use_histogram = true,  // Use histogram-based split finding (faster for large datasets)
-                                int n_bins = 256) {  // Number of bins for histogram (max 256)
+                                int n_bins = 256,  // Number of bins for histogram (max 256)
+                                std::string class_weight = "",  // "balanced" for auto-computed class weights from y, or "" for uniform
+                                py::object classwt = py::none()) {  // Explicit per-class weight vector, overrides class_weight
+        class_weight_ = class_weight;
+        classwt_obj_ = classwt;
         categorical_features_ = categorical_features;
         config_.use_histogram = use_histogram;
         config_.n_bins = n_bins;
@@ -1455,6 +1461,35 @@ PYBIND11_MODULE(RFXFuse, m) {
                 }
             }
             
+            // Compute class weights (Breiman class prior weighting) -- classifier only
+            if (!classwt_obj_.is_none()) {
+                py::array_t<rf::real_t> cwt = np.attr("ascontiguousarray")(classwt_obj_, py::arg("dtype") = np.attr("float32"));
+                auto cwt_buf = cwt.request();
+                if (static_cast<rf::integer_t>(cwt_buf.shape[0]) != config_.nclass) {
+                    throw std::runtime_error("classwt length (" + std::to_string(cwt_buf.shape[0]) +
+                        ") must match number of classes (" + std::to_string(config_.nclass) + ")");
+                }
+                config_.classwt.assign(static_cast<rf::real_t*>(cwt_buf.ptr),
+                                       static_cast<rf::real_t*>(cwt_buf.ptr) + config_.nclass);
+            } else if (class_weight_ == "balanced") {
+                py::array_t<rf::integer_t> y_int_cw(y_safe);
+                auto yi_buf = y_int_cw.request();
+                rf::integer_t* y_ptr_cw = static_cast<rf::integer_t*>(yi_buf.ptr);
+                std::vector<rf::integer_t> counts(config_.nclass, 0);
+                for (rf::integer_t i = 0; i < config_.nsample; ++i) {
+                    rf::integer_t c = y_ptr_cw[i];
+                    if (c >= 0 && c < config_.nclass) counts[c]++;
+                }
+                config_.classwt.resize(config_.nclass);
+                for (rf::integer_t c = 0; c < config_.nclass; ++c) {
+                    config_.classwt[c] = (counts[c] > 0)
+                        ? static_cast<rf::real_t>(config_.nsample) / (static_cast<rf::real_t>(config_.nclass) * static_cast<rf::real_t>(counts[c]))
+                        : 1.0f;
+                }
+            } else {
+                config_.classwt.clear();
+            }
+
             // Create or recreate RandomForest with correct dimensions
             rf_ = new rf::RandomForest(config_);
             
@@ -1753,6 +1788,40 @@ PYBIND11_MODULE(RFXFuse, m) {
                 config_.mtry = std::max(1, static_cast<rf::integer_t>(std::sqrt(static_cast<float>(actual_mdim))));
             }
             
+            // Compute class weights for sparse path (same logic as dense)
+            if (!classwt_obj_.is_none()) {
+                py::module_ np2 = py::module_::import("numpy");
+                py::array_t<rf::real_t> cwt = np2.attr("ascontiguousarray")(classwt_obj_, py::arg("dtype") = np2.attr("float32"));
+                auto cwt_buf = cwt.request();
+                if (static_cast<rf::integer_t>(cwt_buf.shape[0]) != config_.nclass) {
+                    throw std::runtime_error("classwt length must match number of classes");
+                }
+                config_.classwt.assign(static_cast<rf::real_t*>(cwt_buf.ptr),
+                                       static_cast<rf::real_t*>(cwt_buf.ptr) + config_.nclass);
+            } else if (class_weight_ == "balanced") {
+                std::vector<rf::integer_t> counts(config_.nclass, 0);
+                if (y_buf.format == "f") {
+                    const float* yp = static_cast<const float*>(y_buf.ptr);
+                    for (rf::integer_t i = 0; i < actual_nsample; ++i) {
+                        rf::integer_t c = static_cast<rf::integer_t>(yp[i]);
+                        if (c >= 0 && c < config_.nclass) counts[c]++;
+                    }
+                } else {
+                    const int32_t* yp = static_cast<const int32_t*>(y_buf.ptr);
+                    for (rf::integer_t i = 0; i < actual_nsample; ++i) {
+                        if (yp[i] >= 0 && yp[i] < config_.nclass) counts[yp[i]]++;
+                    }
+                }
+                config_.classwt.resize(config_.nclass);
+                for (rf::integer_t c = 0; c < config_.nclass; ++c) {
+                    config_.classwt[c] = (counts[c] > 0)
+                        ? static_cast<rf::real_t>(config_.nsample) / (static_cast<rf::real_t>(config_.nclass) * static_cast<rf::real_t>(counts[c]))
+                        : 1.0f;
+                }
+            } else {
+                config_.classwt.clear();
+            }
+
             // Always recreate RandomForest for sparse to ensure correct config
             if (rf_ != nullptr) {
                 delete rf_;
@@ -2500,7 +2569,7 @@ PYBIND11_MODULE(RFXFuse, m) {
     // Register RandomForestClassifier class
     py::class_<RandomForestClassifier>(m, "RandomForestClassifier")
         .def(py::init<int, int, int, int, int, int, int, int, int, int, int, bool, bool, bool, 
-                      bool, bool, std::string, bool, float, int, int, float, bool, std::string, std::string, int, int, int, bool, std::string, int, bool, bool, bool, py::object, bool, int>(),
+                      bool, bool, std::string, bool, float, int, int, float, bool, std::string, std::string, int, int, int, bool, std::string, int, bool, bool, bool, py::object, bool, int, std::string, py::object>(),
     py::arg("nsample") = 1000,
     py::arg("ntree") = 100,
     py::arg("mdim") = 10,
@@ -2537,7 +2606,9 @@ PYBIND11_MODULE(RFXFuse, m) {
              py::arg("compute_leaf_assignments") = false,  // Store terminal node per sample per tree for on-demand proximity
              py::arg("categorical_features") = py::none(),  // List of column indices (0-based) for categorical features, or None for auto-detection
              py::arg("use_histogram") = true,  // Use histogram-based split finding (faster for large datasets >= 1000 samples)
-             py::arg("n_bins") = 256)  // Number of bins for histogram (max 256)
+             py::arg("n_bins") = 256,  // Number of bins for histogram (max 256)
+             py::arg("class_weight") = "",  // "balanced" for auto-computed class weights from y, or "" for uniform
+             py::arg("classwt") = py::none())  // Explicit per-class weight vector [nclass], overrides class_weight
         // Auto-detecting fit: accepts both dense numpy arrays and scipy sparse matrices
         .def("fit", [](RandomForestClassifier& self, py::object X, py::array y, py::array_t<rf::real_t> sample_weights) {
             if (is_scipy_sparse(X)) {

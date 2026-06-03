@@ -129,20 +129,19 @@ __global__ void gpu_accumulate_oob_votes_kernel(
     integer_t nclass,
     real_t* oob_votes,                // Output: [nsample * nclass] vote counts (real_t for fractional weights)
     integer_t* oob_counts,            // Output: [nsample] number of OOB votes
-    integer_t* error_code
+    integer_t* error_code,
+    const real_t* classwt             // Breiman class prior weights (nullptr = uniform)
 ) {
     integer_t tid = threadIdx.x + blockIdx.x * blockDim.x;
     integer_t stride = blockDim.x * gridDim.x;
 
     for (integer_t n = tid; n < n_samples; n += stride) {
-        // Only accumulate for OOB samples
         if (nin[n] == 0) {
             integer_t pred_class = nodeclass[terminal_nodes[n]];
 
-            // Bounds check class
             if (pred_class >= 0 && pred_class < nclass) {
-                // Atomic increment vote count (real_t for fractional casewise weights)
-                ::atomicAdd(&oob_votes[n * nclass + pred_class], 1.0f);
+                real_t w = (classwt != nullptr) ? classwt[pred_class] : 1.0f;
+                ::atomicAdd(&oob_votes[n * nclass + pred_class], w);
                 ::atomicAdd(&oob_counts[n], 1);
             }
         }
@@ -168,7 +167,8 @@ integer_t gpu_testreebag_sparse(
     integer_t* d_terminal_nodes,
     real_t* d_oob_votes,
     integer_t* d_oob_counts,
-    cudaStream_t stream
+    cudaStream_t stream,
+    const real_t* d_classwt
 ) {
     // Allocate error code on device
     integer_t* d_error;
@@ -223,7 +223,8 @@ integer_t gpu_testreebag_sparse(
             nclass,
             d_oob_votes,
             d_oob_counts,
-            d_error
+            d_error,
+            d_classwt
         );
         
         // Final sync and error check
@@ -258,13 +259,13 @@ __global__ void gpu_adjust_casewise_votes_kernel(
     integer_t nclass,
     integer_t nnode,
     real_t* oob_votes,                // [nsample * nclass] vote counts (modified in-place)
-    integer_t* oob_counts             // [nsample] OOB counts (modified in-place)
+    integer_t* oob_counts,            // [nsample] OOB counts (modified in-place)
+    const real_t* classwt             // Breiman class prior weights (nullptr = uniform)
 ) {
     integer_t tid = threadIdx.x + blockIdx.x * blockDim.x;
     integer_t stride = blockDim.x * gridDim.x;
     
     for (integer_t n = tid; n < nsample; n += stride) {
-        // Only adjust OOB samples
         if (nin[n] != 0) continue;
         
         integer_t kt = terminal_nodes[n];
@@ -273,14 +274,15 @@ __global__ void gpu_adjust_casewise_votes_kernel(
         integer_t pred_class = nodeclass[kt];
         if (pred_class < 0 || pred_class >= nclass) continue;
         
-        // Undo unweighted vote, add weighted vote
-        ::atomicAdd(&oob_votes[n * nclass + pred_class], -1.0f);
+        real_t cw = (classwt != nullptr) ? classwt[pred_class] : 1.0f;
+        // Undo the initial vote (which was cw), replace with tnodewt * cw
+        ::atomicAdd(&oob_votes[n * nclass + pred_class], -cw);
         ::atomicSub(&oob_counts[n], 1);
 
-        real_t vote_weight = tnodewt[kt];
+        real_t vote_weight = tnodewt[kt] * cw;
         ::atomicAdd(&oob_votes[n * nclass + pred_class], vote_weight);
 
-        integer_t weighted_count = static_cast<integer_t>(vote_weight + 0.5f);
+        integer_t weighted_count = static_cast<integer_t>(tnodewt[kt] + 0.5f);
         if (weighted_count < 1) weighted_count = 1;
         ::atomicAdd(&oob_counts[n], weighted_count);
     }
@@ -300,7 +302,8 @@ void gpu_adjust_casewise_votes(
     integer_t nnode,
     real_t* d_oob_votes,
     integer_t* d_oob_counts,
-    cudaStream_t stream
+    cudaStream_t stream,
+    const real_t* d_classwt
 ) {
     dim3 block_size(256);
     dim3 grid_size((nsample + block_size.x - 1) / block_size.x);
@@ -314,7 +317,8 @@ void gpu_adjust_casewise_votes(
         nclass,
         nnode,
         d_oob_votes,
-        d_oob_counts
+        d_oob_counts,
+        d_classwt
     );
 }
 

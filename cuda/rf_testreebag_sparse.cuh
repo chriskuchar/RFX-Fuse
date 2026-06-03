@@ -75,7 +75,8 @@ __global__ void gpu_accumulate_oob_votes_kernel(
     integer_t nclass,
     real_t* oob_votes,
     integer_t* oob_counts,
-    integer_t* error_code
+    integer_t* error_code,
+    const real_t* classwt = nullptr
 );
 
 /**
@@ -113,7 +114,8 @@ integer_t gpu_testreebag_sparse(
     integer_t* d_terminal_nodes,
     real_t* d_oob_votes,
     integer_t* d_oob_counts,
-    cudaStream_t stream
+    cudaStream_t stream,
+    const real_t* d_classwt = nullptr
 );
 
 /**
@@ -144,7 +146,8 @@ void gpu_adjust_casewise_votes(
     integer_t nnode,
     real_t* d_oob_votes,
     integer_t* d_oob_counts,
-    cudaStream_t stream
+    cudaStream_t stream,
+    const real_t* d_classwt = nullptr
 );
 
 } // namespace cuda

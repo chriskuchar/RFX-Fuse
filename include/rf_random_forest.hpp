@@ -119,6 +119,12 @@ struct RandomForestConfig {
                              // Values > 1.0: oversample synthetic data (e.g., 2.0 = twice as many synthetic)
     UnsupervisedMode unsupervised_mode;  // Classification-style or regression-style splitting for unsupervised
 
+    // Breiman class prior weighting (classification only)
+    // Weights modify the voting rule, NOT the Gini splitting.
+    // vote[c] += classwt[c] instead of vote[c] += 1.
+    // Empty vector means uniform weights (standard RF).
+    std::vector<real_t> classwt;
+
     // GPU-only advanced features
     // Loss function type for GPU tree growing
     // 0=Gini (classification only)
