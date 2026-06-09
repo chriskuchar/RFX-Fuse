@@ -164,7 +164,7 @@ jobs:
           method: 'network'
 
       - name: Install Python build tools
-        run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
+        run: python -m pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
 
       - name: Build GPU wheel
         env:
@@ -209,7 +209,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python build tools
-        run: pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
+        run: python -m pip install --upgrade pip setuptools wheel pybind11 numpy cmake delvewheel
 
       - name: Build CPU wheel
         env:

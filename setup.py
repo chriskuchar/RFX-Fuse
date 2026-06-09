@@ -141,7 +141,7 @@ elif os.path.exists('README.md'):
 
 setup(
     name=pkg_name,
-    version='1.1.3',
+    version='1.1.4',
     author='Chris Kuchar',
     author_email='chrisjkuchar@gmail.com',
     description=pkg_description,
