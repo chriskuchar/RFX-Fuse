@@ -119,6 +119,12 @@ struct RandomForestConfig {
                              // Values > 1.0: oversample synthetic data (e.g., 2.0 = twice as many synthetic)
     UnsupervisedMode unsupervised_mode;  // Classification-style or regression-style splitting for unsupervised
 
+    // Breiman class prior weighting (classification only)
+    // Weights modify the voting rule, NOT the Gini splitting.
+    // vote[c] += classwt[c] instead of vote[c] += 1.
+    // Empty vector means uniform weights (standard RF).
+    std::vector<real_t> classwt;
+
     // GPU-only advanced features
     // Loss function type for GPU tree growing
     // 0=Gini (classification only)
@@ -370,6 +376,48 @@ public:
     // Predict leaf assignments for new samples (sparse input)
     void predict_leaf_assignments_sparse(const SparseMatrixCSR& X_new, int16_t* leaf_out) const;
 
+    // Predict proximity importance for new data (Breiman permutation approach)
+    // Measures fraction of trees where permuting a feature changes the terminal node
+    // perm_rows: training rows used as permutation source (Fisher-Yates)
+    // Output shape: importance_out[sample * mdim + feature]
+    void predict_proximity_importance(
+        const real_t* X_new, integer_t n_new,
+        const real_t* perm_rows, integer_t n_repeats,
+        real_t* importance_out) const;
+
+    // Predict local importance for new data
+    // method=0: path attribution (split frequency along decision path)
+    // method=1: permutation-based (prediction change when feature permuted)
+    // For method=1, perm_rows/n_repeats are required; for method=0, they are ignored
+    void predict_local_importance(
+        const real_t* X_new, integer_t n_new,
+        integer_t method,
+        const real_t* perm_rows, integer_t n_repeats,
+        real_t* importance_out) const;
+
+    // Predict outlier scores for new data (Breiman-Cutler formula)
+    // Classification: same-class prox filter + per-class normalization
+    // Regression/Unsupervised: all-sample prox + global normalization
+    // Requires compute_leaf_assignments=True AND compute_outlier_scores() called first
+    // predicted_classes: pass predicted labels for classification, nullptr for regression/unsupervised
+    // mode=0: greedy (anchor-based), mode=1: full
+    void predict_outlier_scores(
+        const real_t* X_new, integer_t n_new,
+        const integer_t* predicted_classes,
+        integer_t mode, integer_t n_anchors,
+        real_t* scores_out) const;
+
+    // Predict top-K similar with per-feature similarity explanations
+    // For each neighbor, decomposes similarity into per-feature contributions
+    // based on shared split variables on co-occurring leaf paths
+    void predict_top_k_similar_with_explanations(
+        const real_t* X_new, integer_t n_new,
+        integer_t k,
+        integer_t* indices_out,    // (n_new, k)
+        real_t* scores_out,        // (n_new, k)
+        real_t* explanations_out   // (n_new, k, mdim)
+    ) const;
+
     // Batch tree growing (GPU-optimized)
     void fit_batch_gpu(const real_t* X, const void* y, const real_t* casewise_weights,
                       integer_t batch_size = 10);
@@ -474,6 +522,13 @@ private:
     std::vector<real_t> outlier_scores_;
     std::vector<integer_t> cluster_labels_;
     std::vector<integer_t> outlier_anchors_;  // Anchor indices for greedy outlier detection
+    
+    // Outlier normalization stats (stored by compute_outlier_scores for predict-time reuse)
+    // Classification: per-class median/MAD keyed by class label
+    // Regression/Unsupervised: global median/MAD (stored with key -1)
+    std::map<integer_t, real_t> outlier_norm_median_;
+    std::map<integer_t, real_t> outlier_norm_mad_;
+    bool outlier_norm_computed_ = false;
     
     // Class label mapping (for non-0-based class labels)
     // Maps original labels (e.g., 3,4,5,6,7,8) to 0-based indices (0,1,2,3,4,5)

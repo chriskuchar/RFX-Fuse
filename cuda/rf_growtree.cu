@@ -2839,7 +2839,8 @@ __global__ void gpu_oob_vote_kernel_casewise(
     // Categorical split support
     const integer_t* cat,          // cat[m] == 1 means quantitative, cat[m] > 1 means categorical
     const integer_t* catgoleft_all, // catgoleft[tree*maxnode*maxcat + node*maxcat + k] = 1 if category k goes left
-    integer_t maxcat) {
+    integer_t maxcat,
+    const real_t* classwt) {       // Breiman class prior weights (nullptr = uniform)
     
     // Each thread handles one sample across all trees
     integer_t sample = blockIdx.x * blockDim.x + threadIdx.x;
@@ -2918,9 +2919,11 @@ __global__ void gpu_oob_vote_kernel_casewise(
                 real_t vote_weight = 1.0f;
                 if (use_casewise && tnodewt_all != nullptr) {
                     real_t tw = tnodewt_all[node_offset + current_node];
-                    // Use tnodewt directly - should be > 0 for all terminal nodes
-                    // (every terminal node should have at least one in-bag sample)
                     vote_weight = tw;
+                }
+                // Breiman class prior weighting
+                if (classwt != nullptr && prediction >= 0 && prediction < nclass) {
+                    vote_weight *= classwt[prediction];
                 }
                 
                 if (prediction >= 0 && prediction < nclass && prediction < 32) {
@@ -2947,7 +2950,8 @@ __global__ void gpu_oob_vote_kernel(
     const integer_t* nodestatus_all, const integer_t* nodeclass_all, 
     const integer_t* bestvar_all, const real_t* xbestsplit_all,
     const integer_t* treemap_all, const integer_t* nin_all, const integer_t* cl,
-    const real_t* x, real_t* q_all) {
+    const real_t* x, real_t* q_all,
+    const real_t* classwt) {
     
     integer_t tree_id = blockIdx.x;
     if (tree_id >= num_trees) return;
@@ -2990,7 +2994,8 @@ __global__ void gpu_oob_vote_kernel(
             if (nodestatus[current_node] == -1) {
                 integer_t prediction = nodeclass[current_node];
                 if (prediction >= 0 && prediction < nclass) {
-                    atomicAdd(&q_all[sample * nclass + prediction], 1.0f);
+                    real_t w = (classwt != nullptr) ? classwt[prediction] : 1.0f;
+                    atomicAdd(&q_all[sample * nclass + prediction], w);
                 }
             }
         }
@@ -3452,6 +3457,13 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
     real_t* q_all_gpu;
     size_t q_size = nsample * nclass * sizeof(real_t);
     CUDA_CHECK_VOID(cudaMalloc(&q_all_gpu, q_size));
+
+    // Breiman class prior weights (nullptr if not set)
+    real_t* d_classwt = nullptr;
+    if (!g_config.classwt.empty() && task_type == 0) {
+        CUDA_CHECK_VOID(cudaMalloc(&d_classwt, g_config.classwt.size() * sizeof(real_t)));
+        CUDA_CHECK_VOID(cudaMemcpy(d_classwt, g_config.classwt.data(), g_config.classwt.size() * sizeof(real_t), cudaMemcpyHostToDevice));
+    }
     
     // std::cout << "DEBUG: q_all_gpu allocation successful, proceeding to memset\n";
     
@@ -4735,8 +4747,8 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
             x_gpu,
             q_all_gpu, nout_gpu,
             g_config.use_casewise,
-            // Categorical split support
-            cat_gpu, catgoleft_all_gpu, maxcat
+            cat_gpu, catgoleft_all_gpu, maxcat,
+            d_classwt
         );
         
         // OPTIMIZATION: Use stream sync before copying results to host
@@ -4889,7 +4901,8 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
             num_trees, nsample, nclass, maxnode, mdim,
             nodestatus_all_gpu, nodeclass_all_gpu,
             bestvar_all_gpu, xbestsplit_all_gpu, treemap_all_gpu,
-            nin_all_gpu, cl_gpu, x_gpu, q_all_gpu
+            nin_all_gpu, cl_gpu, x_gpu, q_all_gpu,
+            d_classwt
         );
         
         // Check for kernel launch errors immediately
@@ -5497,6 +5510,7 @@ void gpu_growtree_batch(integer_t num_trees, const real_t* x, const real_t* win,
     if (treemap_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(treemap_all_gpu));
     if (jinbag_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(jinbag_all_gpu));
     if (q_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(q_all_gpu));
+    if (d_classwt != nullptr) CUDA_CHECK_VOID(cudaFree(d_classwt));
     if (qimp_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(qimp_all_gpu));
     if (qimpm_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(qimpm_all_gpu));
     if (nin_all_gpu != nullptr) CUDA_CHECK_VOID(cudaFree(nin_all_gpu));

@@ -189,7 +189,7 @@ setup(
     ],
     keywords='random forest, machine learning, gpu, cuda, classification, visualization, proximity',
     packages=find_packages(where='python', include=['*']),
-    py_modules=['rfx_impute', 'rfx_fuse_impute', 'rfviz', 'categorical_helper'],
+    py_modules=['rfx_impute', 'rfx_fuse_impute', 'rfviz', 'categorical_helper', 'rfx_metrics'],
     package_dir={'': 'python'},
     include_package_data=True,
     package_data={

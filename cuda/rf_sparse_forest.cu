@@ -9,6 +9,7 @@
 #include "rf_sparse_forest.cuh"
 #include "rf_sparse_cuda.cuh"
 #include "rf_error_codes.cuh"
+#include "rf_config.hpp"
 #include "rf_growtree_sparse.cuh"
 #include "rf_testreebag_sparse.cuh"
 #include "rf_varimp_sparse.cuh"
@@ -551,6 +552,13 @@ integer_t train_sparse_forest_gpu(
     cudaMalloc(&d_oob_counts, static_cast<size_t>(config.nsample) * sizeof(integer_t));
     cudaMemset(d_oob_votes, 0, static_cast<size_t>(config.nsample) * static_cast<size_t>(config.nclass) * sizeof(real_t));
     cudaMemset(d_oob_counts, 0, static_cast<size_t>(config.nsample) * sizeof(integer_t));
+
+    // Breiman class prior weights
+    real_t* d_classwt = nullptr;
+    if (!g_config.classwt.empty() && config.task_type == 0) {
+        cudaMalloc(&d_classwt, g_config.classwt.size() * sizeof(real_t));
+        cudaMemcpy(d_classwt, g_config.classwt.data(), g_config.classwt.size() * sizeof(real_t), cudaMemcpyHostToDevice);
+    }
     
     // Regression OOB predictions (accumulated weighted predictions)
     real_t* d_oob_predictions_regression = nullptr;
@@ -716,6 +724,7 @@ integer_t train_sparse_forest_gpu(
         if (d_sample_weights_cum) cudaFree(d_sample_weights_cum);
         cudaFree(d_oob_votes);
         cudaFree(d_oob_counts);
+        if (d_classwt) cudaFree(d_classwt);
         if (d_oob_predictions_regression) cudaFree(d_oob_predictions_regression);
         cudaFree(d_error);
         if (d_avimp) cudaFree(d_avimp);
@@ -809,7 +818,8 @@ integer_t train_sparse_forest_gpu(
             d_nodextr,
             d_oob_votes,
             d_oob_counts,
-            stream
+            stream,
+            d_classwt
         );
         
         // REGRESSION OOB ACCUMULATION - same pattern as classification vote accumulation
@@ -981,7 +991,8 @@ integer_t train_sparse_forest_gpu(
                     nnode,
                     d_oob_votes,
                     d_oob_counts,
-                    stream
+                    stream,
+                    d_classwt
                 );
             }
         }
@@ -1320,6 +1331,7 @@ integer_t train_sparse_forest_gpu(
     cudaFree(d_nnode_batch);
     cudaFree(d_oob_votes);
     cudaFree(d_oob_counts);
+    if (d_classwt) cudaFree(d_classwt);
     if (d_oob_predictions_regression) cudaFree(d_oob_predictions_regression);
     if (d_oob_weight_sums_regression) cudaFree(d_oob_weight_sums_regression);
     cudaFree(d_jtr);

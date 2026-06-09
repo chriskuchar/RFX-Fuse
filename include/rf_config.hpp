@@ -111,6 +111,9 @@ struct RFConfig {
     bool use_histogram = true;    // Whether to use histogram-based split finding
     integer_t n_bins = 256;       // Number of bins for histogram (max 256 for uint8_t storage)
 
+    // Breiman class prior weights for classification vote weighting
+    std::vector<real_t> classwt;
+
     // Helper methods
     void init_from_params(integer_t ns, integer_t nt, integer_t md, integer_t nc, integer_t mc) {
         nsample = ns;
