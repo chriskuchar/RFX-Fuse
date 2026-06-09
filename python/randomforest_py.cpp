@@ -16,6 +16,8 @@
 #include <sstream>
 #include <cctype>
 #include <memory>
+#include <random>
+#include <numeric>
 #ifdef CUDA_FOUND
 #include <cuda_runtime.h>
 #include <iomanip>
@@ -2564,6 +2566,209 @@ PYBIND11_MODULE(RFXFuse, m) {
             
             return py::make_tuple(top_k_indices, top_k_scores);
         }
+
+        // Proximity importance: how much each feature drives leaf placement
+        py::array_t<rf::real_t> predict_proximity_importance(py::array X_in, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_proximity_importance()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+
+            // Build permutation rows by sampling with replacement from X_new itself
+            std::vector<rf::real_t> perm_rows(static_cast<size_t>(n_repeats) * mdim);
+            std::mt19937 rng(config_.iseed);
+            std::uniform_int_distribution<rf::integer_t> dist(0, n_new - 1);
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+            for (int r = 0; r < n_repeats; ++r) {
+                rf::integer_t donor = dist(rng);
+                std::copy(X_ptr + static_cast<size_t>(donor) * mdim,
+                          X_ptr + static_cast<size_t>(donor + 1) * mdim,
+                          perm_rows.data() + static_cast<size_t>(r) * mdim);
+            }
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_proximity_importance(
+                X_ptr, n_new,
+                perm_rows.data(), n_repeats,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Local importance: per-sample, per-feature importance
+        py::array_t<rf::real_t> predict_local_importance(py::array X_in, int method = 0, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_local_importance()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+
+            std::vector<rf::real_t> perm_rows;
+            if (method == 1) {
+                perm_rows.resize(static_cast<size_t>(n_repeats) * mdim);
+                std::mt19937 rng(config_.iseed);
+                std::uniform_int_distribution<rf::integer_t> dist(0, n_new - 1);
+                for (int r = 0; r < n_repeats; ++r) {
+                    rf::integer_t donor = dist(rng);
+                    std::copy(X_ptr + static_cast<size_t>(donor) * mdim,
+                              X_ptr + static_cast<size_t>(donor + 1) * mdim,
+                              perm_rows.data() + static_cast<size_t>(r) * mdim);
+                }
+            }
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_local_importance(
+                X_ptr, n_new,
+                method,
+                perm_rows.empty() ? nullptr : perm_rows.data(),
+                n_repeats,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Outlier scores for new data
+        py::array_t<rf::real_t> predict_outlier_scores(py::array X_in, std::string mode_str = "full", int n_anchors = 100) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_outlier_scores()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+
+            // Get predictions for the new samples (needed for same-class grouping)
+            std::vector<rf::integer_t> predictions(n_new);
+            rf_->predict_classification(X_ptr, n_new, predictions.data());
+
+            rf::integer_t mode = (mode_str == "greedy") ? 0 : 1;
+
+            py::array_t<rf::real_t> result(n_new);
+            auto res_buf = result.request();
+
+            rf_->predict_outlier_scores(
+                X_ptr, n_new,
+                predictions.data(),
+                mode, n_anchors,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Predict top-K similar training samples with explanations (matches get_top_k_similar_with_explanations API)
+        py::tuple predict_top_k_similar_with_explanations(py::array X_in, int k = 5, int n_explanations = 3) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar_with_explanations()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+            rf::integer_t actual_n_exp = std::min(static_cast<rf::integer_t>(n_explanations), mdim);
+
+            // Get full per-feature explanations from C++ core
+            std::vector<rf::integer_t> raw_indices(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_scores(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_explanations(static_cast<size_t>(n_new) * k * mdim);
+
+            rf_->predict_top_k_similar_with_explanations(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new, k,
+                raw_indices.data(), raw_scores.data(), raw_explanations.data());
+
+            // Build output arrays matching get_top_k_similar_with_explanations format
+            // Per-query: (indices, raw_sim, norm_sim, top_feature_indices, top_feature_scores)
+            py::array_t<rf::integer_t> out_indices(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_raw_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_norm_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::integer_t> out_feat_idx(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+            py::array_t<rf::real_t> out_feat_val(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+
+            auto idx_p   = static_cast<rf::integer_t*>(out_indices.request().ptr);
+            auto raw_p   = static_cast<rf::real_t*>(out_raw_sim.request().ptr);
+            auto norm_p  = static_cast<rf::real_t*>(out_norm_sim.request().ptr);
+            auto fi_p    = static_cast<rf::integer_t*>(out_feat_idx.request().ptr);
+            auto fv_p    = static_cast<rf::real_t*>(out_feat_val.request().ptr);
+
+            for (rf::integer_t s = 0; s < n_new; ++s) {
+                // Copy indices and raw similarities
+                rf::real_t max_sim = 0.0f;
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    idx_p[row] = raw_indices[row];
+                    raw_p[row] = raw_scores[row];
+                    if (raw_scores[row] > max_sim) max_sim = raw_scores[row];
+                }
+
+                // Normalized similarities (max = 1.0)
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    norm_p[row] = (max_sim > 0.0f) ? raw_scores[row] / max_sim : 0.0f;
+                }
+
+                // Aggregate explanations across all k neighbors to get per-feature importance,
+                // then pick top n_explanations features
+                std::vector<rf::real_t> feat_agg(mdim, 0.0f);
+                for (int i = 0; i < k; ++i) {
+                    size_t base = (static_cast<size_t>(s) * k + i) * mdim;
+                    for (rf::integer_t f = 0; f < mdim; ++f) {
+                        feat_agg[f] += raw_explanations[base + f];
+                    }
+                }
+
+                std::vector<std::pair<rf::real_t, rf::integer_t>> fi;
+                for (rf::integer_t f = 0; f < mdim; ++f) fi.push_back({feat_agg[f], f});
+                std::partial_sort(fi.begin(), fi.begin() + actual_n_exp, fi.end(),
+                    [](auto& a, auto& b) { return a.first > b.first; });
+
+                for (rf::integer_t i = 0; i < actual_n_exp; ++i) {
+                    fi_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].second;
+                    fv_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].first;
+                }
+            }
+
+            return py::make_tuple(out_indices, out_raw_sim, out_norm_sim, out_feat_idx, out_feat_val);
+        }
     };
 
     // Register RandomForestClassifier class
@@ -2746,7 +2951,54 @@ PYBIND11_MODULE(RFXFuse, m) {
              "    indices[i, j] is the j-th most similar training sample index for new sample i.\n\n"
              "Requires compute_leaf_assignments=True when creating the model.")
         // ====================================================================
-        // BREIMAN-CUTLER OUTLIER DETECTION
+        // PREDICT-TIME EXPLAINABILITY METHODS
+        // ====================================================================
+        .def("predict_proximity_importance", &RandomForestClassifier::predict_proximity_importance,
+             py::arg("X"), py::arg("n_repeats") = 5,
+             "Compute per-feature proximity importance for new samples.\n\n"
+             "Measures the fraction of trees whose terminal node changes when a feature is permuted.\n"
+             "Higher values indicate the feature drives which training neighbors a sample lands near.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    n_repeats: Number of permutation rounds (default 5)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with importance scores in [0,1].")
+        .def("predict_local_importance", &RandomForestClassifier::predict_local_importance,
+             py::arg("X"), py::arg("method") = 0, py::arg("n_repeats") = 5,
+             "Compute per-sample, per-feature local importance for new samples.\n\n"
+             "Two methods available:\n"
+             "  method=0 (path): Uses split variable frequency along decision path, weighted by 1/depth.\n"
+             "  method=1 (permutation): Measures prediction change when each feature is permuted.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    method: 0=path attribution, 1=permutation (default 0)\n"
+             "    n_repeats: Permutation rounds for method=1 (default 5, ignored for method=0)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with local importance scores.")
+        .def("predict_outlier_scores", &RandomForestClassifier::predict_outlier_scores,
+             py::arg("X"), py::arg("mode") = "full", py::arg("n_anchors") = 100,
+             "Compute Breiman-Cutler outlier scores for new samples.\n\n"
+             "Classification: uses same-class proximity filter + per-class normalization.\n"
+             "Normalized as (raw - median_class) / MAD_class. Scores > 10 indicate outliers.\n"
+             "Requires compute_outlier_scores() on training data first.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    mode: 'full' (exact) or 'greedy' (top n_anchors proximate samples only)\n"
+             "    n_anchors: Anchor count for greedy mode (default 100)\n\n"
+             "Returns:\n"
+             "    1D array of normalized outlier scores for each new sample.")
+        .def("predict_top_k_similar_with_explanations", &RandomForestClassifier::predict_top_k_similar_with_explanations,
+             py::arg("X"), py::arg("k") = 5, py::arg("n_explanations") = 3,
+             "Find top-K similar training samples for new data, with feature explanations.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    k: Number of similar training samples to return (default 5)\n"
+             "    n_explanations: Number of top features to explain similarity (default 3)\n\n"
+             "Returns:\n"
+             "    Tuple of (indices, raw_similarities, normalized_similarities, feature_indices, feature_scores)\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
+        // ====================================================================
+        // BREIMAN-CUTLER OUTLIER DETECTION (training data)
         // ====================================================================
         .def("compute_outlier_scores", 
              [](RandomForestClassifier& self, const std::string& mode, rf::integer_t n_anchors) {
@@ -3908,6 +4160,189 @@ PYBIND11_MODULE(RFXFuse, m) {
         py::array_t<double> compute_mds_3d_from_factors() {
             return compute_mds_from_factors(3);
         }
+
+        // Proximity importance for regressor
+        py::array_t<rf::real_t> predict_proximity_importance(py::array X_in, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_proximity_importance()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+
+            std::vector<rf::real_t> perm_rows(static_cast<size_t>(n_repeats) * mdim);
+            std::mt19937 rng(config_.iseed);
+            std::uniform_int_distribution<rf::integer_t> dist(0, n_new - 1);
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+            for (int r = 0; r < n_repeats; ++r) {
+                rf::integer_t donor = dist(rng);
+                std::copy(X_ptr + static_cast<size_t>(donor) * mdim,
+                          X_ptr + static_cast<size_t>(donor + 1) * mdim,
+                          perm_rows.data() + static_cast<size_t>(r) * mdim);
+            }
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_proximity_importance(
+                X_ptr, n_new,
+                perm_rows.data(), n_repeats,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Local importance for regressor
+        py::array_t<rf::real_t> predict_local_importance(py::array X_in, int method = 0, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_local_importance()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+
+            std::vector<rf::real_t> perm_rows;
+            if (method == 1) {
+                perm_rows.resize(static_cast<size_t>(n_repeats) * mdim);
+                std::mt19937 rng(config_.iseed);
+                std::uniform_int_distribution<rf::integer_t> dist(0, n_new - 1);
+                for (int r = 0; r < n_repeats; ++r) {
+                    rf::integer_t donor = dist(rng);
+                    std::copy(X_ptr + static_cast<size_t>(donor) * mdim,
+                              X_ptr + static_cast<size_t>(donor + 1) * mdim,
+                              perm_rows.data() + static_cast<size_t>(r) * mdim);
+                }
+            }
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_local_importance(
+                X_ptr, n_new,
+                method,
+                perm_rows.empty() ? nullptr : perm_rows.data(),
+                n_repeats,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Outlier scores for new data (regressor -- no class filtering, global normalization)
+        py::array_t<rf::real_t> predict_outlier_scores(py::array X_in, std::string mode_str = "full", int n_anchors = 100) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_outlier_scores()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mode = (mode_str == "greedy") ? 0 : 1;
+
+            py::array_t<rf::real_t> result(n_new);
+            auto res_buf = result.request();
+
+            rf_->predict_outlier_scores(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new,
+                nullptr,
+                mode, n_anchors,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Predict top-K similar with explanations (regressor) -- matches get_top_k_similar_with_explanations API
+        py::tuple predict_top_k_similar_with_explanations(py::array X_in, int k = 5, int n_explanations = 3) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar_with_explanations()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+            rf::integer_t actual_n_exp = std::min(static_cast<rf::integer_t>(n_explanations), mdim);
+
+            std::vector<rf::integer_t> raw_indices(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_scores(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_explanations(static_cast<size_t>(n_new) * k * mdim);
+
+            rf_->predict_top_k_similar_with_explanations(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new, k,
+                raw_indices.data(), raw_scores.data(), raw_explanations.data());
+
+            py::array_t<rf::integer_t> out_indices(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_raw_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_norm_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::integer_t> out_feat_idx(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+            py::array_t<rf::real_t> out_feat_val(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+
+            auto idx_p  = static_cast<rf::integer_t*>(out_indices.request().ptr);
+            auto raw_p  = static_cast<rf::real_t*>(out_raw_sim.request().ptr);
+            auto norm_p = static_cast<rf::real_t*>(out_norm_sim.request().ptr);
+            auto fi_p   = static_cast<rf::integer_t*>(out_feat_idx.request().ptr);
+            auto fv_p   = static_cast<rf::real_t*>(out_feat_val.request().ptr);
+
+            for (rf::integer_t s = 0; s < n_new; ++s) {
+                rf::real_t max_sim = 0.0f;
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    idx_p[row] = raw_indices[row];
+                    raw_p[row] = raw_scores[row];
+                    if (raw_scores[row] > max_sim) max_sim = raw_scores[row];
+                }
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    norm_p[row] = (max_sim > 0.0f) ? raw_scores[row] / max_sim : 0.0f;
+                }
+                std::vector<rf::real_t> feat_agg(mdim, 0.0f);
+                for (int i = 0; i < k; ++i) {
+                    size_t base = (static_cast<size_t>(s) * k + i) * mdim;
+                    for (rf::integer_t f = 0; f < mdim; ++f) feat_agg[f] += raw_explanations[base + f];
+                }
+                std::vector<std::pair<rf::real_t, rf::integer_t>> fi;
+                for (rf::integer_t f = 0; f < mdim; ++f) fi.push_back({feat_agg[f], f});
+                std::partial_sort(fi.begin(), fi.begin() + actual_n_exp, fi.end(),
+                    [](auto& a, auto& b) { return a.first > b.first; });
+                for (rf::integer_t i = 0; i < actual_n_exp; ++i) {
+                    fi_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].second;
+                    fv_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].first;
+                }
+            }
+
+            return py::make_tuple(out_indices, out_raw_sim, out_norm_sim, out_feat_idx, out_feat_val);
+        }
     };
 
     // Register RandomForestRegressor class
@@ -4055,6 +4490,51 @@ PYBIND11_MODULE(RFXFuse, m) {
              "Returns:\n"
              "    Tuple of (indices, similarity_scores) both of shape (n_samples_new, k).\n"
              "    indices[i, j] is the j-th most similar training sample index for new sample i.\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
+        // ====================================================================
+        // PREDICT-TIME EXPLAINABILITY METHODS
+        // ====================================================================
+        .def("predict_proximity_importance", &RandomForestRegressor::predict_proximity_importance,
+             py::arg("X"), py::arg("n_repeats") = 5,
+             "Compute per-feature proximity importance for new samples.\n\n"
+             "Measures the fraction of trees whose terminal node changes when a feature is permuted.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    n_repeats: Number of permutation rounds (default 5)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with importance scores in [0,1].")
+        .def("predict_local_importance", &RandomForestRegressor::predict_local_importance,
+             py::arg("X"), py::arg("method") = 0, py::arg("n_repeats") = 5,
+             "Compute per-sample, per-feature local importance for new samples.\n\n"
+             "  method=0 (path): Split variable frequency along decision path, weighted by 1/depth.\n"
+             "  method=1 (permutation): Prediction change when each feature is permuted.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    method: 0=path attribution, 1=permutation (default 0)\n"
+             "    n_repeats: Permutation rounds for method=1 (default 5, ignored for method=0)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with local importance scores.")
+        .def("predict_outlier_scores", &RandomForestRegressor::predict_outlier_scores,
+             py::arg("X"), py::arg("mode") = "full", py::arg("n_anchors") = 100,
+             "Compute Breiman-Cutler outlier scores for new samples.\n\n"
+             "Regression: uses all training samples (no class filter) + global normalization.\n"
+             "Normalized as (raw - median) / MAD. Scores > 10 indicate outliers.\n"
+             "Requires compute_outlier_scores() on training data first.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    mode: 'full' (exact) or 'greedy' (top n_anchors proximate samples only)\n"
+             "    n_anchors: Anchor count for greedy mode (default 100)\n\n"
+             "Returns:\n"
+             "    1D array of normalized outlier scores for each new sample.")
+        .def("predict_top_k_similar_with_explanations", &RandomForestRegressor::predict_top_k_similar_with_explanations,
+             py::arg("X"), py::arg("k") = 5, py::arg("n_explanations") = 3,
+             "Find top-K similar training samples for new data, with feature explanations.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    k: Number of similar training samples to return (default 5)\n"
+             "    n_explanations: Number of top features to explain similarity (default 3)\n\n"
+             "Returns:\n"
+             "    Tuple of (indices, raw_similarities, normalized_similarities, feature_indices, feature_scores)\n\n"
              "Requires compute_leaf_assignments=True when creating the model.")
         .def("get_proximity_matrix", &RandomForestRegressor::get_proximity_matrix)
         .def("compute_proximity_matrix", &RandomForestRegressor::get_proximity_matrix, "Alias for get_proximity_matrix()")
@@ -5186,6 +5666,266 @@ PYBIND11_MODULE(RFXFuse, m) {
             if (!rf_) return false;
             return rf_->has_inverted_leaf_index();
         }
+
+        // Predict leaf assignments for new samples (dense input)
+        py::array_t<int16_t> predict_leaf_assignments(py::array X_in) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_leaf_assignments()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t nsamples_new = X_buf.shape[0];
+            rf::integer_t ntree = rf_->get_n_trees();
+
+            py::array_t<int16_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(ntree)});
+            auto result_buf = result.request();
+
+            rf_->predict_leaf_assignments(
+                static_cast<rf::real_t*>(X_buf.ptr),
+                nsamples_new,
+                static_cast<int16_t*>(result_buf.ptr));
+
+            return result;
+        }
+
+        // Predict top-K similar training samples for new data
+        py::tuple predict_top_k_similar(py::array X_in, int k = 10) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar()");
+
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            const int16_t* train_leaf_ptr = rf_->get_leaf_assignments();
+            if (!train_leaf_ptr) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t nsamples_new = X_buf.shape[0];
+            rf::integer_t ntree = rf_->get_n_trees();
+            rf::integer_t nsample_train = rf_->get_n_samples();
+
+            std::vector<int16_t> new_leaves(nsamples_new * ntree);
+            rf_->predict_leaf_assignments(
+                static_cast<rf::real_t*>(X_buf.ptr),
+                nsamples_new,
+                new_leaves.data()
+            );
+
+            py::array_t<rf::integer_t> top_k_indices(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> top_k_scores(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(nsamples_new), static_cast<py::ssize_t>(k)});
+            auto idx_buf = top_k_indices.request();
+            auto score_buf = top_k_scores.request();
+
+            for (rf::integer_t q = 0; q < nsamples_new; ++q) {
+                std::vector<rf::real_t> similarities(nsample_train, 0.0f);
+                for (rf::integer_t t = 0; t < ntree; ++t) {
+                    int16_t query_leaf = new_leaves[q * ntree + t];
+                    for (rf::integer_t i = 0; i < nsample_train; ++i) {
+                        if (train_leaf_ptr[t * nsample_train + i] == query_leaf) {
+                            similarities[i] += 1.0f;
+                        }
+                    }
+                }
+                for (rf::integer_t i = 0; i < nsample_train; ++i) {
+                    similarities[i] /= static_cast<rf::real_t>(ntree);
+                }
+                std::vector<rf::integer_t> indices(nsample_train);
+                std::iota(indices.begin(), indices.end(), 0);
+                std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                    [&similarities](rf::integer_t a, rf::integer_t b) {
+                        return similarities[a] > similarities[b];
+                    });
+                for (int i = 0; i < k; ++i) {
+                    static_cast<rf::integer_t*>(idx_buf.ptr)[q * k + i] = indices[i];
+                    static_cast<rf::real_t*>(score_buf.ptr)[q * k + i] = similarities[indices[i]];
+                }
+            }
+
+            return py::make_tuple(top_k_indices, top_k_scores);
+        }
+
+        // Proximity importance for unsupervised
+        py::array_t<rf::real_t> predict_proximity_importance(py::array X_in, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_proximity_importance()");
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+
+            std::vector<rf::real_t> perm_rows(static_cast<size_t>(n_repeats) * mdim);
+            std::mt19937 rng(config_.iseed);
+            std::uniform_int_distribution<rf::integer_t> dist(0, n_new - 1);
+            const rf::real_t* X_ptr = static_cast<rf::real_t*>(X_buf.ptr);
+            for (int r = 0; r < n_repeats; ++r) {
+                rf::integer_t donor = dist(rng);
+                std::copy(X_ptr + static_cast<size_t>(donor) * mdim,
+                          X_ptr + static_cast<size_t>(donor + 1) * mdim,
+                          perm_rows.data() + static_cast<size_t>(r) * mdim);
+            }
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_proximity_importance(
+                X_ptr, n_new,
+                perm_rows.data(), n_repeats,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Local importance for unsupervised (path-based only, method=0)
+        py::array_t<rf::real_t> predict_local_importance(py::array X_in, int method = 0, int n_repeats = 5) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_local_importance()");
+            if (method == 1) {
+                throw std::runtime_error("Permutation-based local importance (method=1) is not available for unsupervised mode. Use method=0 (path attribution).");
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+
+            py::array_t<rf::real_t> result(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(mdim)});
+            auto res_buf = result.request();
+
+            rf_->predict_local_importance(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new,
+                0, nullptr, 0,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Outlier scores for new data (unsupervised -- no class filtering, global normalization)
+        py::array_t<rf::real_t> predict_outlier_scores(py::array X_in, std::string mode_str = "full", int n_anchors = 100) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_outlier_scores()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mode = (mode_str == "greedy") ? 0 : 1;
+
+            py::array_t<rf::real_t> result(n_new);
+            auto res_buf = result.request();
+
+            rf_->predict_outlier_scores(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new,
+                nullptr,
+                mode, n_anchors,
+                static_cast<rf::real_t*>(res_buf.ptr));
+
+            return result;
+        }
+
+        // Predict top-K similar with explanations (unsupervised) -- matches get_top_k_similar_with_explanations API
+        py::tuple predict_top_k_similar_with_explanations(py::array X_in, int k = 5, int n_explanations = 3) {
+            if (!rf_) throw std::runtime_error("Model must be fitted before calling predict_top_k_similar_with_explanations()");
+            if (!rf_->has_leaf_assignments()) {
+                throw std::runtime_error("Leaf assignments not available. Set compute_leaf_assignments=True.");
+            }
+            if (!rf_->has_inverted_leaf_index() && rf_->has_leaf_assignments()) {
+                rf_->build_inverted_leaf_index();
+            }
+
+            py::module_ np = py::module_::import("numpy");
+            py::object X_converted = np.attr("ascontiguousarray")(X_in, py::arg("dtype") = np.attr("float32"));
+            py::array_t<rf::real_t, py::array::c_style> X_contig(X_converted);
+            auto X_buf = X_contig.request();
+            if (X_buf.ndim != 2) throw std::runtime_error("X must be 2-dimensional");
+
+            rf::integer_t n_new = X_buf.shape[0];
+            rf::integer_t mdim  = rf_->get_n_features();
+            rf::integer_t actual_n_exp = std::min(static_cast<rf::integer_t>(n_explanations), mdim);
+
+            std::vector<rf::integer_t> raw_indices(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_scores(static_cast<size_t>(n_new) * k);
+            std::vector<rf::real_t> raw_explanations(static_cast<size_t>(n_new) * k * mdim);
+
+            rf_->predict_top_k_similar_with_explanations(
+                static_cast<rf::real_t*>(X_buf.ptr), n_new, k,
+                raw_indices.data(), raw_scores.data(), raw_explanations.data());
+
+            py::array_t<rf::integer_t> out_indices(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_raw_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::real_t> out_norm_sim(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(k)});
+            py::array_t<rf::integer_t> out_feat_idx(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+            py::array_t<rf::real_t> out_feat_val(std::vector<py::ssize_t>{
+                static_cast<py::ssize_t>(n_new), static_cast<py::ssize_t>(actual_n_exp)});
+
+            auto idx_p  = static_cast<rf::integer_t*>(out_indices.request().ptr);
+            auto raw_p  = static_cast<rf::real_t*>(out_raw_sim.request().ptr);
+            auto norm_p = static_cast<rf::real_t*>(out_norm_sim.request().ptr);
+            auto fi_p   = static_cast<rf::integer_t*>(out_feat_idx.request().ptr);
+            auto fv_p   = static_cast<rf::real_t*>(out_feat_val.request().ptr);
+
+            for (rf::integer_t s = 0; s < n_new; ++s) {
+                rf::real_t max_sim = 0.0f;
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    idx_p[row] = raw_indices[row];
+                    raw_p[row] = raw_scores[row];
+                    if (raw_scores[row] > max_sim) max_sim = raw_scores[row];
+                }
+                for (int i = 0; i < k; ++i) {
+                    size_t row = static_cast<size_t>(s) * k + i;
+                    norm_p[row] = (max_sim > 0.0f) ? raw_scores[row] / max_sim : 0.0f;
+                }
+                std::vector<rf::real_t> feat_agg(mdim, 0.0f);
+                for (int i = 0; i < k; ++i) {
+                    size_t base = (static_cast<size_t>(s) * k + i) * mdim;
+                    for (rf::integer_t f = 0; f < mdim; ++f) feat_agg[f] += raw_explanations[base + f];
+                }
+                std::vector<std::pair<rf::real_t, rf::integer_t>> fi;
+                for (rf::integer_t f = 0; f < mdim; ++f) fi.push_back({feat_agg[f], f});
+                std::partial_sort(fi.begin(), fi.begin() + actual_n_exp, fi.end(),
+                    [](auto& a, auto& b) { return a.first > b.first; });
+                for (rf::integer_t i = 0; i < actual_n_exp; ++i) {
+                    fi_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].second;
+                    fv_p[static_cast<size_t>(s) * actual_n_exp + i] = fi[i].first;
+                }
+            }
+
+            return py::make_tuple(out_indices, out_raw_sim, out_norm_sim, out_feat_idx, out_feat_val);
+        }
     };
 
     // Register RandomForestUnsupervised class
@@ -5347,7 +6087,67 @@ PYBIND11_MODULE(RFXFuse, m) {
         .def("has_inverted_leaf_index", &RandomForestUnsupervised::has_inverted_leaf_index,
              "Check if inverted leaf index has been built.")
         // ====================================================================
-        // BREIMAN-CUTLER OUTLIER DETECTION (Unsupervised)
+        // PREDICT-TIME METHODS FOR NEW DATA (Unsupervised)
+        // ====================================================================
+        .def("predict_leaf_assignments", &RandomForestUnsupervised::predict_leaf_assignments,
+             py::arg("X"),
+             "Predict leaf assignments for NEW samples.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_trees) with terminal node IDs.")
+        .def("predict_top_k_similar", &RandomForestUnsupervised::predict_top_k_similar,
+             py::arg("X"), py::arg("k") = 10,
+             "Find top-K most similar TRAINING samples for NEW samples.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    k: Number of similar training samples to return (default 10)\n\n"
+             "Returns:\n"
+             "    Tuple of (indices, similarity_scores) both of shape (n_samples_new, k).\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
+        .def("predict_proximity_importance", &RandomForestUnsupervised::predict_proximity_importance,
+             py::arg("X"), py::arg("n_repeats") = 5,
+             "Compute per-feature proximity importance for new samples.\n\n"
+             "Measures the fraction of trees whose terminal node changes when a feature is permuted.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    n_repeats: Number of permutation rounds (default 5)\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with importance scores in [0,1].")
+        .def("predict_local_importance", &RandomForestUnsupervised::predict_local_importance,
+             py::arg("X"), py::arg("method") = 0, py::arg("n_repeats") = 5,
+             "Compute per-sample, per-feature local importance for new samples.\n\n"
+             "Only method=0 (path attribution) is available for unsupervised mode.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    method: 0=path attribution (only option for unsupervised)\n"
+             "    n_repeats: Ignored for unsupervised\n\n"
+             "Returns:\n"
+             "    2D array of shape (n_samples_new, n_features) with local importance scores.")
+        .def("predict_outlier_scores", &RandomForestUnsupervised::predict_outlier_scores,
+             py::arg("X"), py::arg("mode") = "full", py::arg("n_anchors") = 100,
+             "Compute Breiman-Cutler outlier scores for new samples.\n\n"
+             "Unsupervised: uses all training samples + global normalization.\n"
+             "Normalized as (raw - median) / MAD. Scores > 10 indicate outliers.\n"
+             "Requires compute_outlier_scores() on training data first.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    mode: 'full' (exact) or 'greedy' (approximate)\n"
+             "    n_anchors: Anchor count for greedy mode (default 100)\n\n"
+             "Returns:\n"
+             "    1D array of normalized outlier scores.")
+        .def("predict_top_k_similar_with_explanations", &RandomForestUnsupervised::predict_top_k_similar_with_explanations,
+             py::arg("X"), py::arg("k") = 5, py::arg("n_explanations") = 3,
+             "Find top-K similar training samples for new data, with feature explanations.\n\n"
+             "Args:\n"
+             "    X: New samples, shape (n_samples_new, n_features)\n"
+             "    k: Number of similar training samples to return (default 5)\n"
+             "    n_explanations: Number of top features to explain similarity (default 3)\n\n"
+             "Returns:\n"
+             "    Tuple of (indices, raw_similarities, normalized_similarities, feature_indices, feature_scores)\n\n"
+             "Requires compute_leaf_assignments=True when creating the model.")
+        // ====================================================================
+        // BREIMAN-CUTLER OUTLIER DETECTION (Unsupervised, training data)
         // ====================================================================
         .def("compute_outlier_scores", 
              [](RandomForestUnsupervised& self, const std::string& mode, rf::integer_t n_anchors) {

@@ -14,6 +14,7 @@
 #include <fstream>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <iomanip>
@@ -4198,6 +4199,10 @@ std::vector<real_t> RandomForest::compute_outlier_scores(
     
     outlier_scores_.resize(config_.nsample);
     
+    // Clear and store normalization statistics for predict-time reuse
+    outlier_norm_median_.clear();
+    outlier_norm_mad_.clear();
+
     if (config_.task_type == TaskType::CLASSIFICATION && !y_train_classification_.empty()) {
         // Per-class normalization
         std::map<integer_t, std::vector<integer_t>> class_samples;
@@ -4206,6 +4211,7 @@ std::vector<real_t> RandomForest::compute_outlier_scores(
         }
         
         for (const auto& pair : class_samples) {
+            integer_t cls = pair.first;
             const std::vector<integer_t>& samples = pair.second;
             if (samples.empty()) continue;
             
@@ -4229,7 +4235,11 @@ std::vector<real_t> RandomForest::compute_outlier_scores(
             }
             std::sort(abs_devs.begin(), abs_devs.end());
             real_t mad = abs_devs[abs_devs.size() / 2];
-            if (mad < 1e-10f) mad = 1.0f;  // Avoid division by zero
+            if (mad < 1e-10f) mad = 1.0f;
+            
+            // Store per-class normalization stats
+            outlier_norm_median_[cls] = median;
+            outlier_norm_mad_[cls] = mad;
             
             // Normalize scores for this class
             for (size_t i = 0; i < samples.size(); ++i) {
@@ -4252,12 +4262,17 @@ std::vector<real_t> RandomForest::compute_outlier_scores(
         real_t mad = abs_devs[config_.nsample / 2];
         if (mad < 1e-10f) mad = 1.0f;
         
+        // Store global normalization stats (key -1 = global)
+        outlier_norm_median_[-1] = median;
+        outlier_norm_mad_[-1] = mad;
+        
         // Normalize
         for (integer_t n = 0; n < config_.nsample; ++n) {
             outlier_scores_[n] = (raw_outlier[n] - median) / mad;
         }
     }
     
+    outlier_norm_computed_ = true;
     return outlier_scores_;
 }
 
@@ -4908,6 +4923,547 @@ void RandomForest::predict_leaf_assignments_sparse(const SparseMatrixCSR& X_new,
             // Cast to size_t to avoid integer overflow in index calculation
             size_t leaf_out_idx = static_cast<size_t>(sample) * static_cast<size_t>(ntree) + static_cast<size_t>(tree);
             leaf_out[leaf_out_idx] = static_cast<int16_t>(current_node);
+        }
+    }
+}
+
+// ============================================================================
+// PREDICT PROXIMITY IMPORTANCE (Breiman permutation approach)
+// All trees contribute -- no correctness filter at predict time (no ground truth).
+// Output = fraction of trees where permuting feature k changed the terminal node,
+// averaged across n_repeats permutation rounds.
+// ============================================================================
+void RandomForest::predict_proximity_importance(
+    const real_t* X_new, integer_t n_new,
+    const real_t* perm_rows, integer_t n_repeats,
+    real_t* importance_out) const {
+
+    const integer_t ntree = config_.ntree;
+    const integer_t maxnode = config_.maxnode;
+    const integer_t mdim = config_.mdim;
+
+    std::fill(importance_out, importance_out + static_cast<size_t>(n_new) * mdim, 0.0f);
+
+    auto traverse = [&](const real_t* sample_features, integer_t tree) -> integer_t {
+        const integer_t* nodestatus = nodestatus_.data() + tree * maxnode;
+        const integer_t* bestvar    = bestvar_.data()    + tree * maxnode;
+        const real_t*    xbestsplit = xbestsplit_.data()  + tree * maxnode;
+        const integer_t* treemap    = treemap_.data()    + tree * maxnode * 2;
+        const integer_t* catgoleft  = catgoleft_.data()  + tree * maxnode * config_.maxcat;
+
+        integer_t node = 0;
+        for (integer_t k = 0; k < maxnode; ++k) {
+            if (nodestatus[node] == -1) break;
+            integer_t sv = bestvar[node];
+            if (sv < 0 || sv >= mdim) break;
+            real_t fv = sample_features[sv];
+            if (cat_[sv] == 1) {
+                node = (fv <= xbestsplit[node]) ? treemap[node * 2] : treemap[node * 2 + 1];
+            } else {
+                integer_t jcat = static_cast<integer_t>(fv + 0.5);
+                if (jcat >= 0 && jcat < cat_[sv]) {
+                    node = (catgoleft[node * config_.maxcat + jcat] == 1)
+                        ? treemap[node * 2] : treemap[node * 2 + 1];
+                }
+            }
+        }
+        return node;
+    };
+
+    real_t inv_ntree = 1.0f / static_cast<real_t>(ntree);
+
+    for (integer_t s = 0; s < n_new; ++s) {
+        const real_t* original = X_new + static_cast<size_t>(s) * mdim;
+
+        std::vector<integer_t> base_leaves(ntree);
+        for (integer_t t = 0; t < ntree; ++t) {
+            base_leaves[t] = traverse(original, t);
+        }
+
+        std::vector<real_t> sample_copy(original, original + mdim);
+        for (integer_t f = 0; f < mdim; ++f) {
+            real_t saved = sample_copy[f];
+            real_t accumulated = 0.0f;
+
+            for (integer_t r = 0; r < n_repeats; ++r) {
+                sample_copy[f] = perm_rows[static_cast<size_t>(r) * mdim + f];
+
+                for (integer_t t = 0; t < ntree; ++t) {
+                    integer_t perm_leaf = traverse(sample_copy.data(), t);
+                    if (perm_leaf != base_leaves[t]) {
+                        accumulated += inv_ntree;
+                    }
+                }
+            }
+
+            sample_copy[f] = saved;
+            importance_out[static_cast<size_t>(s) * mdim + f] =
+                accumulated / static_cast<real_t>(n_repeats);
+        }
+    }
+}
+
+// ============================================================================
+// PREDICT LOCAL IMPORTANCE
+// ============================================================================
+void RandomForest::predict_local_importance(
+    const real_t* X_new, integer_t n_new,
+    integer_t method,
+    const real_t* perm_rows, integer_t n_repeats,
+    real_t* importance_out) const {
+
+    const integer_t ntree = config_.ntree;
+    const integer_t maxnode = config_.maxnode;
+    const integer_t mdim = config_.mdim;
+    const integer_t nclass = config_.nclass;
+
+    std::fill(importance_out, importance_out + static_cast<size_t>(n_new) * mdim, 0.0f);
+
+    if (method == 0) {
+        // Path attribution: for each tree, record which split variables are used
+        // on the root-to-leaf path, weight = 1/depth, sum across trees
+        for (integer_t s = 0; s < n_new; ++s) {
+            const real_t* sample_features = X_new + static_cast<size_t>(s) * mdim;
+
+            for (integer_t tree = 0; tree < ntree; ++tree) {
+                const integer_t* nodestatus = nodestatus_.data() + tree * maxnode;
+                const integer_t* bestvar    = bestvar_.data()    + tree * maxnode;
+                const real_t*    xbestsplit = xbestsplit_.data()  + tree * maxnode;
+                const integer_t* treemap    = treemap_.data()    + tree * maxnode * 2;
+                const integer_t* catgoleft  = catgoleft_.data()  + tree * maxnode * config_.maxcat;
+
+                integer_t node = 0;
+                integer_t depth = 0;
+                std::vector<integer_t> path_vars;
+
+                for (integer_t k = 0; k < maxnode; ++k) {
+                    if (nodestatus[node] == -1) break;
+                    integer_t sv = bestvar[node];
+                    if (sv < 0 || sv >= mdim) break;
+
+                    path_vars.push_back(sv);
+                    depth++;
+
+                    real_t fv = sample_features[sv];
+                    if (cat_[sv] == 1) {
+                        node = (fv <= xbestsplit[node]) ? treemap[node * 2] : treemap[node * 2 + 1];
+                    } else {
+                        integer_t jcat = static_cast<integer_t>(fv + 0.5);
+                        if (jcat >= 0 && jcat < cat_[sv]) {
+                            node = (catgoleft[node * config_.maxcat + jcat] == 1)
+                                ? treemap[node * 2] : treemap[node * 2 + 1];
+                        }
+                    }
+                }
+
+                if (depth > 0) {
+                    real_t weight = 1.0f / static_cast<real_t>(depth);
+                    for (integer_t sv : path_vars) {
+                        importance_out[static_cast<size_t>(s) * mdim + sv] += weight;
+                    }
+                }
+            }
+
+            // Normalize by ntree
+            for (integer_t f = 0; f < mdim; ++f) {
+                importance_out[static_cast<size_t>(s) * mdim + f] /= static_cast<real_t>(ntree);
+            }
+        }
+    } else {
+        // Permutation-based local importance.
+        // No pseudo-labels or correctness filters -- at predict time there is no
+        // ground truth. We directly measure the effect of permuting each feature:
+        //
+        // Classification: fraction of repeats where the ensemble majority vote
+        //   changes when feature k is permuted. Higher = more important.
+        //
+        // Regression: mean absolute change in ensemble prediction when feature k
+        //   is permuted, scaled by 100. Higher = more important (analogous to
+        //   training-time MSE increase).
+        const bool is_classification = (config_.task_type == TaskType::CLASSIFICATION);
+        const bool use_classwt = (is_classification && !config_.classwt.empty());
+        const bool has_reg_preds = !node_predictions_regression_.empty();
+
+        auto traverse_to_node = [&](const real_t* sample_features, integer_t tree) -> integer_t {
+            const integer_t* nodestatus = nodestatus_.data() + tree * maxnode;
+            const integer_t* bestvar    = bestvar_.data()    + tree * maxnode;
+            const real_t*    xbestsplit = xbestsplit_.data()  + tree * maxnode;
+            const integer_t* treemap    = treemap_.data()    + tree * maxnode * 2;
+            const integer_t* catgoleft  = catgoleft_.data()  + tree * maxnode * config_.maxcat;
+
+            integer_t node = 0;
+            for (integer_t k = 0; k < maxnode; ++k) {
+                if (nodestatus[node] == -1) break;
+                integer_t sv = bestvar[node];
+                if (sv < 0 || sv >= mdim) break;
+                real_t fv = sample_features[sv];
+                if (cat_[sv] == 1) {
+                    node = (fv <= xbestsplit[node]) ? treemap[node * 2] : treemap[node * 2 + 1];
+                } else {
+                    integer_t jcat = static_cast<integer_t>(fv + 0.5);
+                    if (jcat >= 0 && jcat < cat_[sv]) {
+                        node = (catgoleft[node * config_.maxcat + jcat] == 1)
+                            ? treemap[node * 2] : treemap[node * 2 + 1];
+                    }
+                }
+            }
+            return node;
+        };
+
+        real_t inv_ntree = 1.0f / static_cast<real_t>(ntree);
+
+        // Helper: compute majority vote class from per-tree nodes
+        auto majority_vote = [&](const std::vector<integer_t>& nodes) -> integer_t {
+            std::vector<real_t> votes(nclass, 0.0f);
+            for (integer_t t = 0; t < ntree; ++t) {
+                integer_t cls = nodeclass_[static_cast<size_t>(t) * maxnode + nodes[t]];
+                if (cls >= 0 && cls < nclass)
+                    votes[cls] += use_classwt ? config_.classwt[cls] : 1.0f;
+            }
+            integer_t best = 0;
+            for (integer_t c = 1; c < nclass; ++c) {
+                if (votes[c] > votes[best]) best = c;
+            }
+            return best;
+        };
+
+        if (is_classification) {
+            for (integer_t s = 0; s < n_new; ++s) {
+                const real_t* original = X_new + static_cast<size_t>(s) * mdim;
+
+                // Baseline: majority vote with original features
+                std::vector<integer_t> base_nodes(ntree);
+                for (integer_t t = 0; t < ntree; ++t) {
+                    base_nodes[t] = traverse_to_node(original, t);
+                }
+                integer_t base_pred = majority_vote(base_nodes);
+
+                // For each feature, count how often permuting it changes the majority vote
+                std::vector<real_t> sample_copy(original, original + mdim);
+                for (integer_t f = 0; f < mdim; ++f) {
+                    real_t saved = sample_copy[f];
+                    integer_t changed = 0;
+
+                    for (integer_t r = 0; r < n_repeats; ++r) {
+                        sample_copy[f] = perm_rows[static_cast<size_t>(r) * mdim + f];
+
+                        std::vector<integer_t> perm_nodes(ntree);
+                        for (integer_t t = 0; t < ntree; ++t) {
+                            perm_nodes[t] = traverse_to_node(sample_copy.data(), t);
+                        }
+                        if (majority_vote(perm_nodes) != base_pred) {
+                            changed++;
+                        }
+                    }
+
+                    sample_copy[f] = saved;
+                    importance_out[static_cast<size_t>(s) * mdim + f] =
+                        static_cast<real_t>(changed) / static_cast<real_t>(n_repeats);
+                }
+            }
+        } else {
+            // Regression: mean absolute change in ensemble prediction
+            for (integer_t s = 0; s < n_new; ++s) {
+                const real_t* original = X_new + static_cast<size_t>(s) * mdim;
+
+                // Baseline ensemble prediction
+                real_t base_pred = 0.0f;
+                for (integer_t t = 0; t < ntree; ++t) {
+                    integer_t node = traverse_to_node(original, t);
+                    if (has_reg_preds) {
+                        base_pred += node_predictions_regression_[static_cast<size_t>(t) * maxnode + node];
+                    }
+                }
+                base_pred *= inv_ntree;
+
+                std::vector<real_t> sample_copy(original, original + mdim);
+                for (integer_t f = 0; f < mdim; ++f) {
+                    real_t saved = sample_copy[f];
+                    real_t total_abs_change = 0.0f;
+
+                    for (integer_t r = 0; r < n_repeats; ++r) {
+                        sample_copy[f] = perm_rows[static_cast<size_t>(r) * mdim + f];
+
+                        real_t perm_pred = 0.0f;
+                        for (integer_t t = 0; t < ntree; ++t) {
+                            integer_t node = traverse_to_node(sample_copy.data(), t);
+                            if (has_reg_preds) {
+                                perm_pred += node_predictions_regression_[static_cast<size_t>(t) * maxnode + node];
+                            }
+                        }
+                        perm_pred *= inv_ntree;
+                        total_abs_change += std::abs(perm_pred - base_pred);
+                    }
+
+                    sample_copy[f] = saved;
+                    importance_out[static_cast<size_t>(s) * mdim + f] =
+                        total_abs_change / static_cast<real_t>(n_repeats);
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// PREDICT OUTLIER SCORES  (Breiman-Cutler formula)
+// ============================================================================
+void RandomForest::predict_outlier_scores(
+    const real_t* X_new, integer_t n_new,
+    const integer_t* predicted_classes,
+    integer_t mode, integer_t n_anchors,
+    real_t* scores_out) const {
+
+    const integer_t ntree = config_.ntree;
+    const integer_t nsample_train = config_.nsample;
+
+    const int16_t* train_leaves = leaf_assignments_.empty() ? nullptr : leaf_assignments_.data();
+    if (!train_leaves) {
+        throw std::runtime_error(
+            "Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
+    }
+
+    if (!outlier_norm_computed_) {
+        throw std::runtime_error(
+            "Outlier normalization stats not available. Call compute_outlier_scores() on training data first.");
+    }
+
+    // Determine whether to use per-class normalization
+    const bool use_class_norm = (predicted_classes != nullptr)
+        && (config_.task_type == TaskType::CLASSIFICATION)
+        && !y_train_classification_.empty();
+
+    // Get new-sample leaf assignments
+    std::vector<int16_t> new_leaves(static_cast<size_t>(n_new) * ntree);
+    predict_leaf_assignments(X_new, n_new, new_leaves.data());
+
+    for (integer_t s = 0; s < n_new; ++s) {
+
+        // Compute proximity to ALL training samples (matches training-time raw computation)
+        std::vector<real_t> prox(nsample_train, 0.0f);
+        for (integer_t t = 0; t < ntree; ++t) {
+            int16_t q_leaf = new_leaves[static_cast<size_t>(s) * ntree + t];
+
+            if (has_inverted_leaf_index()) {
+                const auto& leaf_map = inverted_leaf_index_[t];
+                auto it = leaf_map.find(q_leaf);
+                if (it != leaf_map.end()) {
+                    for (integer_t idx : it->second) {
+                        prox[idx] += 1.0f;
+                    }
+                }
+            } else {
+                for (integer_t i = 0; i < nsample_train; ++i) {
+                    if (train_leaves[static_cast<size_t>(t) * nsample_train + i] == q_leaf) {
+                        prox[i] += 1.0f;
+                    }
+                }
+            }
+        }
+
+        // Normalize to [0,1]
+        for (integer_t i = 0; i < nsample_train; ++i) {
+            prox[i] /= static_cast<real_t>(ntree);
+        }
+
+        // Raw outlier score: N / sum(prox^2) over all training samples with positive prox
+        // Consistent with training-time compute_outlier_scores() which uses all samples
+        real_t sum_prox_sq = 0.0f;
+        integer_t n_count = 0;
+
+        if (mode == 0 && n_anchors > 0) {
+            // Greedy mode: top n_anchors most-proximate samples
+            std::vector<std::pair<real_t, integer_t>> pos_prox;
+            for (integer_t i = 0; i < nsample_train; ++i) {
+                if (prox[i] > 0.0f) {
+                    pos_prox.push_back({prox[i], i});
+                }
+            }
+            std::partial_sort(pos_prox.begin(),
+                pos_prox.begin() + std::min(static_cast<integer_t>(pos_prox.size()), n_anchors),
+                pos_prox.end(),
+                [](const auto& a, const auto& b) { return a.first > b.first; });
+
+            integer_t use_n = std::min(static_cast<integer_t>(pos_prox.size()), n_anchors);
+            for (integer_t i = 0; i < use_n; ++i) {
+                sum_prox_sq += pos_prox[i].first * pos_prox[i].first;
+            }
+            n_count = use_n;
+        } else {
+            // Full mode: all training samples with positive proximity
+            for (integer_t i = 0; i < nsample_train; ++i) {
+                if (prox[i] > 0.0f) {
+                    sum_prox_sq += prox[i] * prox[i];
+                    n_count++;
+                }
+            }
+        }
+
+        // Raw score (same formula as training-time)
+        real_t raw_score;
+        if (sum_prox_sq > 1e-10f && n_count > 0) {
+            raw_score = static_cast<real_t>(n_count) / sum_prox_sq;
+        } else {
+            raw_score = static_cast<real_t>(nsample_train) * 1e10f;
+        }
+
+        // Normalize using stored training-time statistics
+        // Classification: per-class median/MAD from predicted class
+        // Regression/Unsupervised: global median/MAD (key -1)
+        real_t median, mad;
+        if (use_class_norm) {
+            integer_t cls = predicted_classes[s];
+            auto med_it = outlier_norm_median_.find(cls);
+            auto mad_it = outlier_norm_mad_.find(cls);
+            if (med_it != outlier_norm_median_.end() && mad_it != outlier_norm_mad_.end()) {
+                median = med_it->second;
+                mad = mad_it->second;
+            } else {
+                median = 0.0f;
+                mad = 1.0f;
+            }
+        } else {
+            auto med_it = outlier_norm_median_.find(-1);
+            auto mad_it = outlier_norm_mad_.find(-1);
+            if (med_it != outlier_norm_median_.end() && mad_it != outlier_norm_mad_.end()) {
+                median = med_it->second;
+                mad = mad_it->second;
+            } else {
+                median = 0.0f;
+                mad = 1.0f;
+            }
+        }
+
+        scores_out[s] = (raw_score - median) / mad;
+    }
+}
+
+// ============================================================================
+// PREDICT TOP-K SIMILAR WITH EXPLANATIONS
+// ============================================================================
+void RandomForest::predict_top_k_similar_with_explanations(
+    const real_t* X_new, integer_t n_new,
+    integer_t k,
+    integer_t* indices_out,
+    real_t* scores_out,
+    real_t* explanations_out) const {
+
+    const integer_t ntree = config_.ntree;
+    const integer_t maxnode = config_.maxnode;
+    const integer_t mdim = config_.mdim;
+    const integer_t nsample_train = config_.nsample;
+
+    const int16_t* train_leaves = leaf_assignments_.empty() ? nullptr : leaf_assignments_.data();
+    if (!train_leaves) {
+        throw std::runtime_error(
+            "Leaf assignments not available. Set compute_leaf_assignments=True when creating the model.");
+    }
+
+    // Get new-sample leaf assignments
+    std::vector<int16_t> new_leaves(static_cast<size_t>(n_new) * ntree);
+    predict_leaf_assignments(X_new, n_new, new_leaves.data());
+
+    // Precompute decision paths for new samples (which split vars are on the path to each leaf)
+    // path_vars[sample][tree] = vector of split variables used on root-to-leaf path
+    // Also store training-sample leaf IDs for co-occurrence check
+
+    // Helper: trace path and collect split variables
+    auto trace_path = [&](const real_t* sample_features, integer_t tree) -> std::vector<integer_t> {
+        const integer_t* nodestatus = nodestatus_.data() + tree * maxnode;
+        const integer_t* bestvar    = bestvar_.data()    + tree * maxnode;
+        const real_t*    xbestsplit = xbestsplit_.data()  + tree * maxnode;
+        const integer_t* treemap    = treemap_.data()    + tree * maxnode * 2;
+        const integer_t* catgoleft  = catgoleft_.data()  + tree * maxnode * config_.maxcat;
+
+        std::vector<integer_t> vars;
+        integer_t node = 0;
+        for (integer_t itr = 0; itr < maxnode; ++itr) {
+            if (nodestatus[node] == -1) break;
+            integer_t sv = bestvar[node];
+            if (sv < 0 || sv >= mdim) break;
+            vars.push_back(sv);
+            real_t fv = sample_features[sv];
+            if (cat_[sv] == 1) {
+                node = (fv <= xbestsplit[node]) ? treemap[node * 2] : treemap[node * 2 + 1];
+            } else {
+                integer_t jcat = static_cast<integer_t>(fv + 0.5);
+                if (jcat >= 0 && jcat < cat_[sv]) {
+                    node = (catgoleft[node * config_.maxcat + jcat] == 1)
+                        ? treemap[node * 2] : treemap[node * 2 + 1];
+                }
+            }
+        }
+        return vars;
+    };
+
+    for (integer_t s = 0; s < n_new; ++s) {
+        const real_t* sample_features = X_new + static_cast<size_t>(s) * mdim;
+
+        // Compute per-feature co-occurrence decomposition for all training samples
+        // For each tree where query and training sample share a leaf,
+        // credit the split variables used on the query's path in that tree
+        std::vector<real_t> total_prox(nsample_train, 0.0f);
+        std::vector<std::vector<real_t>> feature_prox(nsample_train, std::vector<real_t>(mdim, 0.0f));
+
+        for (integer_t t = 0; t < ntree; ++t) {
+            int16_t q_leaf = new_leaves[static_cast<size_t>(s) * ntree + t];
+
+            // Trace the query's decision path in this tree
+            std::vector<integer_t> path_vars = trace_path(sample_features, t);
+            real_t depth_inv = path_vars.empty() ? 0.0f : (1.0f / static_cast<real_t>(path_vars.size()));
+
+            if (has_inverted_leaf_index()) {
+                const auto& leaf_map = inverted_leaf_index_[t];
+                auto it = leaf_map.find(q_leaf);
+                if (it != leaf_map.end()) {
+                    for (integer_t idx : it->second) {
+                        total_prox[idx] += 1.0f;
+                        for (integer_t sv : path_vars) {
+                            feature_prox[idx][sv] += depth_inv;
+                        }
+                    }
+                }
+            } else {
+                for (integer_t i = 0; i < nsample_train; ++i) {
+                    if (train_leaves[static_cast<size_t>(t) * nsample_train + i] == q_leaf) {
+                        total_prox[i] += 1.0f;
+                        for (integer_t sv : path_vars) {
+                            feature_prox[i][sv] += depth_inv;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Normalize proximity to [0,1]
+        for (integer_t i = 0; i < nsample_train; ++i) {
+            total_prox[i] /= static_cast<real_t>(ntree);
+        }
+
+        // Top-K by total proximity
+        std::vector<integer_t> sorted_indices(nsample_train);
+        std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+        integer_t actual_k = std::min(k, nsample_train);
+        std::partial_sort(sorted_indices.begin(), sorted_indices.begin() + actual_k, sorted_indices.end(),
+            [&total_prox](integer_t a, integer_t b) {
+                return total_prox[a] > total_prox[b];
+            });
+
+        for (integer_t ki = 0; ki < actual_k; ++ki) {
+            integer_t neighbor = sorted_indices[ki];
+            size_t row = static_cast<size_t>(s) * actual_k + ki;
+            indices_out[row] = neighbor;
+            scores_out[row] = total_prox[neighbor];
+
+            // Normalize per-feature explanation to sum to 1.0
+            real_t feat_sum = 0.0f;
+            for (integer_t f = 0; f < mdim; ++f) {
+                feat_sum += feature_prox[neighbor][f];
+            }
+            real_t norm = (feat_sum > 0.0f) ? (1.0f / feat_sum) : 0.0f;
+            for (integer_t f = 0; f < mdim; ++f) {
+                explanations_out[(static_cast<size_t>(s) * actual_k + ki) * mdim + f] =
+                    feature_prox[neighbor][f] * norm;
+            }
         }
     }
 }
